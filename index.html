@@ -124,6 +124,12 @@
       <p>Takes a deliberately awful sales export — four date formats, <code>$19.90</code> / <code>R$&nbsp;45,00</code> / <code>1.299,00</code>, <code>ACME CORP</code> vs <code>Acme Corp</code>, blanks, duplicates — and returns one tidy table plus by-month / by-product / top-customer summaries, and the script to re-run it. 20 tests. Dropped-row reasons are reported, not silent.</p>
       <div class="links"><a href="https://github.com/juniobc/python-samples/tree/main/sales-cleanup">code &rarr;</a></div>
     </div>
+    <div class="card">
+      <h3><a href="https://github.com/juniobc/python-samples/tree/main/github-sync">github-sync</a></h3>
+      <span class="tag">api integration · httpx · pytest</span>
+      <p>Syncs a GitHub user's repos to a JSON file. The point of the sample is the API-integration plumbing a real client job needs: token auth, <code>Link</code>-header pagination, <code>403</code> rate-limit &rarr; wait-for-reset, <code>5xx</code> &rarr; capped backoff, <code>ETag</code> / <code>304</code> conditional requests, and an add/remove/update diff between runs. 27 tests, driven end to end by <code>httpx.MockTransport</code> — no network, no real sleeping.</p>
+      <div class="links"><a href="https://github.com/juniobc/python-samples/tree/main/github-sync">code &rarr;</a></div>
+    </div>
   </div>
 
   <h2>How I work</h2>
