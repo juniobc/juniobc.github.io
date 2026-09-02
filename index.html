@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Junio · Python developer</title>
+<meta name="description" content="Python developer — web scraping, API integration, data cleaning and automation. Small reliable tools, delivered with tests and a README." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" />
+<style>
+  :root {
+    --bg: #fbfbf9;
+    --surface: #ffffff;
+    --ink: #17191e;
+    --ink-soft: #565b66;
+    --ink-faint: #8b909b;
+    --line: #e6e5e1;
+    --accent: #235e9c;
+    --code-bg: #f1f1ee;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #101216;
+      --surface: #171a1f;
+      --ink: #e7e9ec;
+      --ink-soft: #a0a6b0;
+      --ink-faint: #6b7280;
+      --line: #262a31;
+      --accent: #63a0d8;
+      --code-bg: #1d2127;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 680px; margin: 0 auto; padding: 72px 24px 96px; }
+  .mono { font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  .eyebrow {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--ink-faint); margin: 0 0 14px;
+  }
+  h1 {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: clamp(26px, 5vw, 34px); font-weight: 600; letter-spacing: -.01em;
+    margin: 0 0 10px; line-height: 1.2;
+  }
+  .lede { font-size: 18px; color: var(--ink-soft); margin: 0 0 8px; }
+  .meta { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 13px; color: var(--ink-faint); margin: 0; }
+
+  h2 {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 14px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--ink-faint); font-weight: 600;
+    margin: 56px 0 18px; padding-bottom: 8px; border-bottom: 1px solid var(--line);
+  }
+
+  ul.offer { list-style: none; padding: 0; margin: 0; display: grid; gap: 14px; }
+  ul.offer li { display: grid; grid-template-columns: 8ch 1fr; gap: 14px; align-items: baseline; }
+  ul.offer .k { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 13px; color: var(--accent); }
+  ul.offer .v { color: var(--ink-soft); }
+  ul.offer .v b { color: var(--ink); font-weight: 600; }
+
+  .work { display: grid; gap: 22px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+    padding: 20px 22px;
+  }
+  .card h3 { margin: 0 0 4px; font-size: 17px; }
+  .card h3 a { color: var(--ink); text-decoration: none; }
+  .card h3 a:hover { color: var(--accent); }
+  .card .tag { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 12px; color: var(--ink-faint); }
+  .card p { margin: 10px 0 0; color: var(--ink-soft); font-size: 15px; }
+  .card .links { margin-top: 12px; font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 13px; }
+  .card .links a { color: var(--accent); text-decoration: none; }
+  .card .links a:hover { text-decoration: underline; }
+
+  p { color: var(--ink-soft); }
+  p b { color: var(--ink); }
+  code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; font-family: ui-monospace, monospace; font-size: .9em; }
+  a { color: var(--accent); }
+
+  .contact { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 14px; display: grid; gap: 8px; }
+  .contact span { color: var(--ink-faint); }
+
+  footer { margin-top: 64px; font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 12px; color: var(--ink-faint); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p class="eyebrow">Python developer · freelance</p>
+  <h1>Junio</h1>
+  <p class="lede">I build small, reliable Python tools — web scrapers, API integrations, data-cleaning pipelines and automation scripts.</p>
+  <p class="meta">GMT&#8722;3 (Brazil) · works with tests + a README, every time</p>
+
+  <h2>What I do</h2>
+  <ul class="offer">
+    <li><span class="k">scrape</span><span class="v"><b>Turn a website into clean data.</b> Any site → CSV / JSON / Postgres / Google Sheet. Pagination, change-monitoring, saved-page tests.</span></li>
+    <li><span class="k">api</span><span class="v"><b>Integrate a third-party API.</b> Auth, pagination, retries, rate limits — wrapped in a clean client or a sync job.</span></li>
+    <li><span class="k">clean</span><span class="v"><b>Fix a messy CSV / Excel.</b> Mixed dates, "$1,299.00" vs "1.299,00", duplicates, blank rows → one tidy table + the summary you need + the script to re-run it.</span></li>
+    <li><span class="k">automate</span><span class="v"><b>Kill a repetitive task.</b> The thing you do by hand every week becomes one command, or a scheduled job.</span></li>
+    <li><span class="k">service</span><span class="v"><b>A small FastAPI / Flask service</b> around any of the above.</span></li>
+  </ul>
+  <p style="margin-top:16px">Stack: Python 3.12+, <code>httpx</code>, <code>pandas</code>, <code>selectolax</code> / BeautifulSoup, <code>FastAPI</code>, <code>pytest</code>, Playwright when a site needs a real browser.</p>
+
+  <h2>Work samples</h2>
+  <div class="work">
+    <div class="card">
+      <h3><a href="https://github.com/juniobc/python-samples/tree/main/hn-scraper-api">hn-scraper-api</a></h3>
+      <span class="tag">scraping · fastapi · pytest</span>
+      <p>Scrapes the Hacker News front page into typed records and serves them over a small cached JSON API. Shows how I structure a scraping job: a <b>pure parser</b> unit-tested offline against a saved page, a thin I/O layer, pydantic models, a FastAPI wrapper. 8 tests.</p>
+      <div class="links"><a href="https://github.com/juniobc/python-samples/tree/main/hn-scraper-api">code &rarr;</a></div>
+    </div>
+    <div class="card">
+      <h3><a href="https://github.com/juniobc/python-samples/tree/main/sales-cleanup">sales-cleanup</a></h3>
+      <span class="tag">pandas · data cleaning · pytest</span>
+      <p>Takes a deliberately awful sales export — four date formats, <code>$19.90</code> / <code>R$&nbsp;45,00</code> / <code>1.299,00</code>, <code>ACME CORP</code> vs <code>Acme Corp</code>, blanks, duplicates — and returns one tidy table plus by-month / by-product / top-customer summaries, and the script to re-run it. 20 tests. Dropped-row reasons are reported, not silent.</p>
+      <div class="links"><a href="https://github.com/juniobc/python-samples/tree/main/sales-cleanup">code &rarr;</a></div>
+    </div>
+  </div>
+
+  <h2>How I work</h2>
+  <p>I <b>scope tightly and deliver what I quote.</b> If your job isn't a fit, I say so. Every delivery includes tests and a short README so your team can run and extend it without me. For a scraping or data job I'll usually send a small sample of the output first, so you see it before committing.</p>
+
+  <h2>Contact</h2>
+  <div class="contact">
+    <div><span>email &nbsp;&nbsp;</span> <a href="mailto:juniobc@gmail.com">juniobc@gmail.com</a></div>
+    <div><span>fiverr &nbsp;</span> <a href="#">fiverr.com/&hellip;</a></div>
+    <div><span>upwork &nbsp;</span> <a href="#">upwork.com/&hellip;</a></div>
+    <div><span>github &nbsp;</span> <a href="https://github.com/juniobc">github.com/juniobc</a></div>
+  </div>
+
+  <footer>Built with Python. Page is one static file.</footer>
+</div>
+</body>
+</html>
