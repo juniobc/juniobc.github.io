@@ -130,6 +130,12 @@
       <p>Syncs a GitHub user's repos to a JSON file. The point of the sample is the API-integration plumbing a real client job needs: token auth, <code>Link</code>-header pagination, <code>403</code> rate-limit &rarr; wait-for-reset, <code>5xx</code> &rarr; capped backoff, <code>ETag</code> / <code>304</code> conditional requests, and an add/remove/update diff between runs. 27 tests, driven end to end by <code>httpx.MockTransport</code> — no network, no real sleeping.</p>
       <div class="links"><a href="https://github.com/juniobc/python-samples/tree/main/github-sync">code &rarr;</a></div>
     </div>
+    <div class="card">
+      <h3><a href="https://github.com/juniobc/python-samples/tree/main/job-extract">job-extract</a></h3>
+      <span class="tag">scraping + llm &middot; pydantic &middot; pytest</span>
+      <p>Messy job-posting HTML &rarr; a <b>validated</b> typed record. The point is making the LLM output trustworthy: a strict schema (unknown fields rejected, salaries non-negative, currency normalised), tolerant JSON parsing, and a re-prompt loop that feeds the exact validation error back to the model until it complies or a retry budget runs out. The model is an injected dependency, so all 15 tests run with no network and no API key.</p>
+      <div class="links"><a href="https://github.com/juniobc/python-samples/tree/main/job-extract">code &rarr;</a></div>
+    </div>
   </div>
 
   <h2>How I work</h2>
