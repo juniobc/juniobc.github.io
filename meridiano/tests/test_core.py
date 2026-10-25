@@ -93,3 +93,16 @@ def test_api_auth_and_ledger(conn, monkeypatch):
     r = c.post("/api/ledger", json=body, headers={"X-Admin-Token": "admin"})
     assert r.json()["caixa"] == 49.9
     assert c.post("/api/ledger", json=body, headers={"X-Admin-Token": "admin"}).status_code == 409
+
+
+def test_deploy_log_route(conn, tmp_path, monkeypatch):
+    monkeypatch.setenv("MERIDIANO_API_TOKEN", "leitura")
+    log = tmp_path / "deploy.log"
+    log.write_text("\n".join(f"linha {i}" for i in range(80)))
+    monkeypatch.setenv("DEPLOY_LOG", str(log))
+    from meridiano.api import main
+    main._conn = conn
+    c = TestClient(main.app)
+    assert c.get("/api/deploy-log").status_code == 401
+    r = c.get("/api/deploy-log", headers={"X-Token": "leitura"}).json()
+    assert len(r["linhas"]) == 50 and r["linhas"][-1] == "linha 79"

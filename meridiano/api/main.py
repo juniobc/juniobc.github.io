@@ -81,6 +81,18 @@ def ledger():
     return conn().execute("SELECT id,kind,amount_cents,description,source,created_at FROM ledger ORDER BY id DESC LIMIT 100").fetchall()
 
 
+@app.get("/api/deploy-log", dependencies=[Depends(read_auth)])
+def deploy_log(lines: int = Query(50, ge=1, le=50)):
+    """Últimas linhas do log do deploy automático (para o Claude ver o resultado de cada push)."""
+    path = config.env("DEPLOY_LOG", os.path.join(os.path.expanduser("~"), "meridiano", "deploy.log"))
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            tail = f.read().splitlines()[-lines:]
+    except FileNotFoundError:
+        tail = []
+    return {"path": path, "linhas": tail}
+
+
 class Entry(BaseModel):
     kind: str = Field(pattern="^(receita|despesa)$")
     amount_cents: int = Field(gt=0)
