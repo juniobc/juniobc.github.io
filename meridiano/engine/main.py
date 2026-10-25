@@ -23,16 +23,23 @@ def main():
     last = 0
     while True:
         me = pick(conn, last)
+        if me and llm.ahead_of_budget(conn):
+            log.info("tokens acima do ritmo do dia; esperando")
+            time.sleep(300)
+            continue
+        ran = False
         if me:
             last = me["id"]
             try:
-                agent.run_turn(conn, me)
+                if agent.should_run(conn, me):
+                    ran = True
+                    agent.run_turn(conn, me)
             except llm.BudgetExceeded as e:
                 log.warning("%s", e)
                 time.sleep(600)
             except Exception as e:
                 log.exception("erro no turno de %s: %s", me["slug"], e)
-        time.sleep(config.TICK_SECONDS)
+        time.sleep(config.TICK_SECONDS if ran else 5)  # quem não tem trabalho novo é pulado sem chamar o modelo
 
 
 if __name__ == "__main__":

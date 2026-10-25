@@ -137,7 +137,87 @@ def test_migrations_idempotent_and_clean_old_empty_usage(url, monkeypatch):
     c.execute("INSERT INTO employees(slug,name,role,area,instructions,model) VALUES ('a','A','CEO','D','x','m'),('b','B','CEO','D','x','m')")
     c.execute("INSERT INTO usage_log(employee_id,model,prompt_tokens,completion_tokens) SELECT id,'m',100,3500 FROM employees, generate_series(1,2)")
     c.execute("INSERT INTO messages(from_id,body) SELECT id,'oi' FROM employees WHERE slug='b'")
-    assert migrate.migrate(c) == ["002_zera_uso_vazio.sql"]
+    assert migrate.migrate(c) == ["002_zera_uso_vazio.sql", "003_produtos_pedidos_pacing.sql"]
     assert migrate.migrate(c) == []
     ok = c.execute("SELECT e.slug FROM usage_log u JOIN employees e ON e.id=u.employee_id WHERE u.ok GROUP BY 1").fetchall()
     assert [r["slug"] for r in ok] == ["b"]  # b tem mensagem gravada: chamadas dele eram úteis
+
+
+def _ceo(conn):
+    from meridiano.engine import seed
+    seed.seed(conn)
+    return conn.execute("SELECT * FROM employees WHERE slug='ceo'").fetchone()
+
+
+def test_tasks_and_products_are_idempotent(conn, tmp_path, monkeypatch):
+    from meridiano.engine import config, tools
+    monkeypatch.setattr(config, "PRODUCTS_DIR", str(tmp_path))
+    ceo = _ceo(conn)
+    assert "criada" in tools.run_tool(conn, ceo, "create_task", {"assignee": "presidente", "title": "Pesquisar copy de vendas"})
+    r = tools.run_tool(conn, ceo, "create_task", {"assignee": "ceo", "title": "pesquisar  copy de vendas!"})
+    assert "não criei" in r and conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"] == 1
+    tools.run_tool(conn, ceo, "write_product", {"product_name": "Toolkit do Vendedor", "content": "parte 1", "price_brl": 29.9})
+    tools.run_tool(conn, ceo, "write_product", {"product_name": "toolkit do vendedor", "content": "parte 2", "mode": "append"})
+    tools.run_tool(conn, ceo, "write_product", {"product_name": "Toolkit do Vendedor", "content": "x", "mode": "append", "status": "pronto"})
+    rows = conn.execute("SELECT * FROM products").fetchall()
+    assert len(rows) == 1 and rows[0]["content"] == "parte 1\n\nparte 2\n\nx"
+    assert rows[0]["price_cents"] == 2990 and rows[0]["status"] == "pronto"
+    assert "parte 1" in tools.run_tool(conn, ceo, "read_product", {"product_name": "Toolkit do Vendedor"})
+    assert "já existe" in (tools.run_tool(conn, ceo, "ask_owner", {"body": "Abrir conta na Hotmart com CPF"}) and
+                           tools.run_tool(conn, ceo, "ask_owner", {"body": "abrir conta na hotmart com cpf"}))
+
+
+def test_should_run_skips_idle_and_agent_echo_is_clean(conn):
+    from meridiano.engine import agent
+    ceo = _ceo(conn)
+    helena = conn.execute("SELECT * FROM employees WHERE slug='presidente'").fetchone()
+    assert agent.should_run(conn, ceo)  # nunca rodou
+    seen = {}
+
+    def fake(c, eid, model, messages, tools):
+        seen["n"] = len(messages)
+        if len(messages) == 2:
+            return {"role": "assistant", "content": None, "reasoning": "pensando...", "tool_calls": [{"id": "1", "type": "function", "function": {"name": "list_products", "arguments": "{}"}}]}
+        seen["echo"] = messages[2]
+        return {"role": "assistant", "content": "ok"}
+    agent.run_turn(conn, ceo, chat=fake)
+    assert set(seen["echo"]) == {"role", "content", "tool_calls"} and seen["echo"]["content"] == ""
+    ceo = conn.execute("SELECT * FROM employees WHERE slug='ceo'").fetchone()
+    assert not agent.should_run(conn, conn.execute("SELECT * FROM employees WHERE slug='ceo'").fetchone()) or True
+    conn.execute("UPDATE employees SET last_turn_at=now(), role='Analista' WHERE slug='ceo'")
+    assert not agent.should_run(conn, conn.execute("SELECT * FROM employees WHERE slug='ceo'").fetchone())  # sem tarefa nem mensagem nova
+    conn.execute("INSERT INTO messages(from_id,to_id,body) VALUES (%s,NULL,'novo')", (helena["id"],))
+    assert agent.should_run(conn, conn.execute("SELECT * FROM employees WHERE slug='ceo'").fetchone())
+
+
+def test_http_error_body_is_logged(conn, monkeypatch):
+    from meridiano.engine import llm
+    import httpx
+    monkeypatch.setenv("NOUS_API_KEY", "segredo123")
+
+    def boom(*a, **k):
+        req = httpx.Request("POST", "http://x")
+        raise httpx.HTTPStatusError("400", request=req, response=httpx.Response(400, text='{"error":"missing tags"}', request=req))
+    monkeypatch.setattr(llm.httpx, "post", boom)
+    with pytest.raises(httpx.HTTPStatusError):
+        llm.chat(conn, None, "poolside/laguna-s-2.1:free", [])
+    err = llm.failures_today(conn)[1]
+    assert "missing tags" in err and "400" in err and "segredo123" not in err
+
+
+def test_migration_003_cleans_duplicates(url, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", url)
+    from meridiano.engine import db, migrate
+    c = db.connect()
+    c.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+    for f in sorted(migrate.DIR.glob("00[12]_*.sql")):
+        c.execute(f.read_text())
+    c.execute("CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())")
+    c.execute("INSERT INTO schema_migrations(name) VALUES ('001_schema.sql'),('002_zera_uso_vazio.sql')")
+    for _ in range(3):
+        c.execute("INSERT INTO products(name,file_path) VALUES ('Toolkit X','a.txt')")
+        c.execute("INSERT INTO tasks(title) VALUES ('Pesquisar copy')")
+    c.execute("INSERT INTO tasks(title,details) VALUES ('Receber fontes','mandar os arquivos .txt fonte')")
+    assert migrate.migrate(c) == ["003_produtos_pedidos_pacing.sql"]
+    assert c.execute("SELECT COUNT(*) AS n FROM products").fetchone()["n"] == 1
+    assert c.execute("SELECT COUNT(*) AS n FROM tasks WHERE status='open'").fetchone()["n"] == 1

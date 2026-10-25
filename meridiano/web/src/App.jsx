@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import Office from './Office.jsx';
-import { api, getToken, setToken } from './api.js';
+import { api, post, getToken, setToken } from './api.js';
 
 const brl = (n) => 'R$ ' + Number(n).toFixed(2).replace('.', ',');
 const TABS = ['Escritório', 'Tarefas', 'Produtos', 'Caixa'];
@@ -18,7 +18,7 @@ function Login({ onDone, error }) {
 
 export default function App() {
   const [auth, setAuth] = useState(!!getToken());
-  const [d, setD] = useState({ state: null, emps: [], msgs: [], tasks: [], prods: [], ledger: [] });
+  const [d, setD] = useState({ state: null, emps: [], msgs: [], tasks: [], prods: [], ledger: [], reqs: [] });
   const [err, setErr] = useState('');
   const [loginErr, setLoginErr] = useState('');
   const [tab, setTab] = useState(0);
@@ -29,9 +29,9 @@ export default function App() {
     let on = true;
     const load = async () => {
       try {
-        const [state, emps, msgs, tasks, prods, ledger] = await Promise.all(
-          ['state', 'employees', 'messages?limit=40', 'tasks', 'products', 'ledger'].map(api));
-        if (on) { setD({ state, emps, msgs, tasks, prods, ledger }); setErr(''); }
+        const [state, emps, msgs, tasks, prods, ledger, reqs] = await Promise.all(
+          ['state', 'employees', 'messages?limit=40', 'tasks', 'products', 'ledger', 'owner-requests'].map(api));
+        if (on) { setD({ state, emps, msgs, tasks, prods, ledger, reqs }); setErr(''); }
       } catch (e) {
         if (e.message === '401') { setToken(''); setLoginErr('Token inválido. Confira e tente de novo.'); setAuth(false); } else setErr('Sem conexão com o servidor.');
       }
@@ -56,11 +56,18 @@ export default function App() {
       </div>
       <nav>{TABS.map((t, i) => <button key={t} className={i === tab ? 'on' : ''} onClick={() => setTab(i)}>{t}</button>)}</nav>
 
+      {d.reqs.filter((r) => !r.done).length > 0 && (
+        <section className="card"><strong>Pedidos para você, Junio</strong>
+          {d.reqs.filter((r) => !r.done).map((r) => (
+            <p key={r.id}>{r.body} <small>({r.from_name})</small>{' '}
+              <button onClick={() => post(`owner-requests/${r.id}/done`).catch(() => {})}>Feito</button></p>))}
+        </section>)}
+
       {tab === 0 && <>
         <Office employees={d.emps} speech={speech} selected={sel} onSelect={setSel} />
         <section className="card">{who
           ? <><strong>{who.name}</strong> · {who.role} · {who.area}<p>{who.status === 'working' ? (who.activity || 'Trabalhando') : 'Parado, esperando a vez'}</p>
-              <p className="note">Modelo: {who.model}{who.hired_by ? ` · contratado por ${who.hired_by}: ${who.hire_reason}` : ''}</p></>
+              <p className="note">Hoje: {who.chamadas_hoje} chamadas, {who.tokens_hoje} tokens · Modelo: {who.model}{who.hired_by ? ` · contratado por ${who.hired_by}: ${who.hire_reason}` : ''}</p></>
           : <><strong>Toque em um funcionário</strong><p className="note">Cargo, área e o que faz agora.</p></>}</section>
         <h2>Conversas</h2>
         <ul className="feed">{d.msgs.map((m) => (
@@ -76,7 +83,8 @@ export default function App() {
         {!d.tasks.length && <li className="note">Sem tarefas.</li>}</ul>}
 
       {tab === 2 && <ul className="feed">{d.prods.map((p) => (
-        <li key={p.id}><b>{p.name}</b><br />{p.description}<br /><small>{p.file_path}</small></li>))}
+        <li key={p.id}><b>{p.name}</b> <small>({p.status}{p.price_cents ? ` · ${brl(p.price_cents / 100)}` : ' · sem preço'} · {p.content.length} caracteres)</small><br />{p.description}
+          {p.content && <details><summary>Ver conteúdo</summary><pre style={{ whiteSpace: 'pre-wrap' }}>{p.content}</pre></details>}</li>))}
         {!d.prods.length && <li className="note">Nenhum produto ainda.</li>}</ul>}
 
       {tab === 3 && <>

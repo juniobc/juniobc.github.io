@@ -45,8 +45,12 @@ def chat(conn, employee_id, model, messages, tools=None):
         r.raise_for_status()
         data = r.json()
     except Exception as e:
+        detail = str(e)
+        resp = getattr(e, "response", None)
+        if resp is not None:  # corpo do erro da API (nunca contém a nossa chave)
+            detail = f"{resp.status_code}: {resp.text[:400]}"
         conn.execute("INSERT INTO usage_log(employee_id,model,ok,error) VALUES (%s,%s,false,%s)",
-                     (employee_id, model, str(e)[:300]))
+                     (employee_id, model, f"[{model}] {detail}"[:500]))
         raise
     u = data.get("usage") or {}
     msg = data["choices"][0]["message"]
@@ -57,6 +61,13 @@ def chat(conn, employee_id, model, messages, tools=None):
     if empty:
         raise EmptyResponse(model)
     return msg
+
+
+def ahead_of_budget(conn):
+    """True se os tokens de hoje já passaram do ritmo do dia (+15%): o motor espera em vez de gastar tudo cedo."""
+    _, tokens = usage_today(conn)
+    frac = conn.execute("SELECT extract(epoch FROM now() - date_trunc('day', now())) / 86400 AS f").fetchone()["f"]
+    return tokens / config.DAILY_TOKEN_LIMIT > float(frac) + 0.15
 
 
 def chat_fallback(conn, employee_id, model, messages, tools=None):

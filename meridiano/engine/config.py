@@ -34,9 +34,9 @@ def database_url():
 
 DAILY_CALL_LIMIT = int(env("DAILY_CALL_LIMIT", "300"))
 DAILY_TOKEN_LIMIT = int(env("DAILY_TOKEN_LIMIT", "400000"))
-TICK_SECONDS = int(env("TICK_SECONDS", "60"))
-MAX_TOOL_ROUNDS = int(env("MAX_TOOL_ROUNDS", "6"))
+TICK_SECONDS = int(env("TICK_SECONDS", "150"))  # um funcionário a cada ~2,5 min
+MAX_TOOL_ROUNDS = int(env("MAX_TOOL_ROUNDS", "5"))
 MAX_EMPLOYEES = int(env("MAX_EMPLOYEES", "20"))
-MAX_TOKENS = int(env("MAX_TOKENS", "4096"))
+MAX_TOKENS = int(env("MAX_TOKENS", "3000"))
 DAILY_FAIL_LIMIT = int(env("DAILY_FAIL_LIMIT", "60"))  # chamadas vazias/erro não gastam o limite útil, mas têm teto próprio
 PRODUCTS_DIR = env("PRODUCTS_DIR", os.path.join(os.path.expanduser("~"), "meridiano_produtos"))
