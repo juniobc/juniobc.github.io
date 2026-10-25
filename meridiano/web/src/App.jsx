@@ -95,6 +95,7 @@ export default function App() {
             <small>{new Date(m.created_at).toLocaleString('pt-BR')}</small></li>))}
           {!d.msgs.length && <li className="note">Ainda sem conversas. O motor roda um funcionário por vez.</li>}</ul>
         {s && s.falhas_hoje > 0 && <p className="note" style={{ color: '#ffcc80' }}>Falhas hoje: {s.falhas_hoje}. Último erro: {s.ultimo_erro}</p>}
+        {s && <p className="note">Orçamento do dia: {s.orcamento_pct}% usado, volta a zerar às {new Date(s.orcamento_zera_em).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}.</p>}
         {s && <p className="note">Uso hoje: {s.uso_hoje.chamadas}/{s.uso_hoje.limite_chamadas} chamadas, {s.uso_hoje.tokens}/{s.uso_hoje.limite_tokens} tokens.</p>}
       </>}
 

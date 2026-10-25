@@ -32,8 +32,8 @@ def database_url():
     return url
 
 
-DAILY_CALL_LIMIT = int(env("DAILY_CALL_LIMIT", "300"))
-DAILY_TOKEN_LIMIT = int(env("DAILY_TOKEN_LIMIT", "400000"))
+DAILY_CALL_LIMIT = int(env("DAILY_CALL_LIMIT", "600"))  # modelos são :free; o limite é só válvula de segurança
+DAILY_TOKEN_LIMIT = int(env("DAILY_TOKEN_LIMIT", "1500000"))
 TICK_SECONDS = int(env("TICK_SECONDS", "150"))  # um funcionário a cada ~2,5 min
 MAX_TOOL_ROUNDS = int(env("MAX_TOOL_ROUNDS", "5"))
 MAX_EMPLOYEES = int(env("MAX_EMPLOYEES", "20"))

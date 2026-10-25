@@ -113,6 +113,8 @@ def test_empty_response_is_error_and_does_not_use_budget(conn, monkeypatch):
     monkeypatch.setenv("NOUS_API_KEY", "x")
 
     class R:
+        status_code = 200
+        headers = {}
         def raise_for_status(self): pass
         def json(self): return {"choices": [{"message": {"role": "assistant", "content": None, "reasoning": "..."}}], "usage": {"prompt_tokens": 100, "completion_tokens": 3500}}
     monkeypatch.setattr(llm.httpx, "post", lambda *a, **k: R())
@@ -273,3 +275,36 @@ def test_api_activity_history_card(conn, monkeypatch):
     card = c.get("/api/employees/ceo", headers=h).json()
     assert card["mensagens"][0]["body"] == "Bem-vinda" and card["ultima_atividade"]["kind"] == "conversando"
     assert c.get("/api/employees/nao-existe", headers=h).status_code == 404
+
+
+def test_429_backoff_not_counted_as_failure(conn, monkeypatch):
+    from meridiano.engine import llm
+    monkeypatch.setenv("NOUS_API_KEY", "x")
+    calls = {"n": 0}
+
+    class R:
+        def __init__(self, code): self.status_code = code; self.headers = {}
+        def raise_for_status(self): pass
+        def json(self): return {"choices": [{"message": {"role": "assistant", "content": "ok"}}], "usage": {"prompt_tokens": 5, "completion_tokens": 5}}
+
+    def post(*a, **k):
+        calls["n"] += 1
+        return R(429 if calls["n"] <= 2 else 200)
+    monkeypatch.setattr(llm.httpx, "post", post)
+    waits = []
+    msg = llm.chat_fallback(conn, None, "poolside/laguna-s-2.1:free", [], None, sleep=waits.append)
+    assert msg["content"] == "ok" and waits == [2, 4]          # recuo exponencial
+    assert llm.failures_today(conn)[0] == 0                     # 429 não é falha
+    assert llm.usage_today(conn) == (1, 10)
+
+
+def test_budget_fraction_and_state_fields(conn, monkeypatch):
+    monkeypatch.setenv("MERIDIANO_API_TOKEN", "t")
+    from meridiano.engine import llm, config
+    from meridiano.api import main
+    monkeypatch.setattr(config, "DAILY_TOKEN_LIMIT", 1000)
+    conn.execute("INSERT INTO usage_log(model,prompt_tokens,completion_tokens) VALUES ('m',400,100)")
+    assert llm.budget_fraction(conn) == 0.5
+    main._conn = conn
+    st = TestClient(main.app).get("/api/state", headers={"X-Token": "t"}).json()
+    assert st["orcamento_pct"] == 50.0 and "T" in st["orcamento_zera_em"]

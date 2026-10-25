@@ -25,12 +25,13 @@ if [ ! -f "$ROOT/meridiano.env" ]; then
       echo "NOUS_API_KEY="
       echo "MERIDIANO_API_TOKEN=$(python3 -c 'import secrets;print(secrets.token_urlsafe(24))')"
       echo "MERIDIANO_ADMIN_TOKEN=$(python3 -c 'import secrets;print(secrets.token_urlsafe(24))')"
-      echo "DAILY_CALL_LIMIT=300"
-      echo "DAILY_TOKEN_LIMIT=400000"
     } > "$ROOT/meridiano.env"
   )
   log "criado meridiano.env (preencher NOUS_API_KEY)"
 fi
+
+# migra só os limites antigos que o próprio deploy gravou (300 / 400000); valores escolhidos pelo Junio ficam como estão
+sed -i 's/^DAILY_CALL_LIMIT=300$/DAILY_CALL_LIMIT=600/; s/^DAILY_TOKEN_LIMIT=400000$/DAILY_TOKEN_LIMIT=1500000/' "$ROOT/meridiano.env" 2>/dev/null
 
 healthy() {
   for _ in $(seq 1 30); do
