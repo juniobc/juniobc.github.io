@@ -2625,3 +2625,241 @@ def test_google_start_answers_head_with_the_same_redirect(g):
     g.configure()
     r = g.client.head("/api/auth/google/start")
     assert r.status_code == 302 and r.headers["location"].startswith("https://accounts.google.com/o/oauth2/v2/auth?")
+
+
+# ---------------------------------------------------------------- PR C: descobrir e avaliar modelos
+_PT_TEXT = ("o planejamento do orçamento pessoal começa com a anotação de tudo que entra e de tudo que sai em cada mês para que você possa ver para onde o dinheiro vai " * 30)
+
+
+def _good_call(conn, emp, p, messages, tools=None):
+    q = messages[0]["content"]
+    if tools:
+        return {"role": "assistant", "content": None, "_usage": (30, 12), "tool_calls": [{"id": "1", "type": "function", "function": {"name": "registrar_tarefa", "arguments": '{"titulo": "Revisar o texto de vendas", "prioridade": 2}'}}]}
+    if "450 palavras" in q:
+        return {"role": "assistant", "content": _PT_TEXT, "_usage": (40, 700)}
+    if "JSON" in q:
+        return {"role": "assistant", "content": '{"cidade": "Recife", "pontos": ["a", "b", "c"]}', "_usage": (50, 20)}
+    return {"role": "assistant", "content": "ok", "_usage": (10, 2)}
+
+
+@pytest.fixture()
+def evalmode(monkeypatch):
+    from meridiano.engine import llm_eval
+    monkeypatch.setattr(llm_eval, "BACKGROUND", False)
+    return llm_eval
+
+
+def test_catalog_parse_keeps_only_free_models_with_tools():
+    from meridiano.engine import llm_catalog as cat
+    base = "https://openrouter.ai/api/v1"
+    out = cat.parse([
+        {"id": "a/free-tools:free", "name": "A", "pricing": {"prompt": "0", "completion": "0"}, "supported_parameters": ["tools", "temperature"], "context_length": 32000},
+        {"id": "b/free-no-tools:free", "pricing": {"prompt": "0", "completion": "0"}, "supported_parameters": ["temperature"]},
+        {"id": "c/paid", "pricing": {"prompt": "0.000001", "completion": "0.000002"}, "supported_parameters": ["tools"]},
+        {"id": "d/free-unknown", "pricing": {"prompt": "0", "completion": "0"}},
+        {"id": "e/by-suffix:free"}, {"id": "f/no-price-no-suffix"}, {"name": "sem id"}], "openrouter", base)
+    assert [(m["model"], m["tools"]) for m in out] == [("a/free-tools:free", "sim"), ("d/free-unknown", "desconhecido"), ("e/by-suffix:free", "desconhecido")]
+    assert out[0]["context_length"] == 32000 and out[0]["key_name"] == "openrouter"
+
+
+def test_catalog_fetch_uses_key_reports_errors_and_blocks_foreign_hosts(secdir, monkeypatch):
+    from meridiano.engine import llm_catalog as cat
+    seen = []
+
+    def get(url, headers=None, timeout=None):
+        seen.append((url, dict(headers or {})))
+        return _Resp(200, {"data": [{"id": "x:free", "pricing": {"prompt": "0", "completion": "0"}, "supported_parameters": ["tools"]}]})
+    monkeypatch.setattr(cat.httpx, "get", get)
+    items, warn = cat.fetch("openrouter", "https://openrouter.ai/api/v1")
+    assert len(items) == 1 and "sem chave" in warn and seen[0][1] == {} and seen[0][0] == "https://openrouter.ai/api/v1/models"
+    (secdir / "llm-openrouter").write_text("chave-or-123456")
+    items, warn = cat.fetch("openrouter", "https://openrouter.ai/api/v1")
+    assert warn == "" and seen[1][1] == {"Authorization": "Bearer chave-or-123456"}
+    monkeypatch.setattr(cat.httpx, "get", lambda *a, **k: _Resp(401, {}))
+    assert cat.fetch("nous", "https://inference-api.nousresearch.com/v1")[1].startswith("o provedor recusou")
+    assert cat.fetch("x", "https://evil.example.com/v1") == ([], "endereço fora da lista permitida")
+
+
+def test_discover_stores_only_new_candidates_and_is_idempotent(conn):
+    from meridiano.engine import llm_catalog as cat
+    nous = [{"model": "poolside/laguna-s-2.1:free", "name": "ja existe", "context_length": None, "tools": "desconhecido", "key_name": "nous", "base_url": "https://inference-api.nousresearch.com/v1"},
+            {"model": "novo/modelo-nous:free", "name": "Novo Nous", "context_length": 8000, "tools": "desconhecido", "key_name": "nous", "base_url": "https://inference-api.nousresearch.com/v1"}]
+    orr = [{"model": "nvidia/nemotron:free", "name": "Nemotron", "context_length": 128000, "tools": "sim", "key_name": "openrouter", "base_url": "https://openrouter.ai/api/v1"}]
+    fetcher = lambda key, base: (nous, "") if key == "nous" else (orr, "sem chave 'openrouter': consulta feita sem login")
+    r = cat.discover(conn, fetcher)
+    assert sorted(x["model"] for x in r["novos"]) == ["novo/modelo-nous:free", "nvidia/nemotron:free"] and r["total_candidatos"] == 2 and "OpenRouter" in r["avisos"][0]
+    assert cat.discover(conn, fetcher)["novos"] == []                                      # nada repetido
+    assert conn.execute("SELECT COUNT(*) AS n FROM llm_profiles WHERE needs_eval").fetchone()["n"] == 0   # descobrir não cria perfil nem liga nada
+
+
+def test_evaluation_cases_have_strict_checks():
+    from meridiano.engine import llm_eval as ev
+    assert ev._chk_tool({"tool_calls": [{"function": {"name": "registrar_tarefa", "arguments": '{"titulo": "x", "prioridade": 2}'}}]})[0]
+    for bad in ('{"titulo": "x", "prioridade": "2"}', '{"titulo": "x", "prioridade": 9}', '{"titulo": "", "prioridade": 1}', "nao-json", '{"prioridade": 1}'):
+        assert not ev._chk_tool({"tool_calls": [{"function": {"name": "registrar_tarefa", "arguments": bad}}]})[0]
+    assert not ev._chk_tool({"content": "chamei a ferramenta"})[0] and not ev._chk_tool({"tool_calls": [{"function": {"name": "outra", "arguments": "{}"}}]})[0]
+    assert ev._chk_400({"content": _PT_TEXT})[0]
+    assert not ev._chk_400({"content": "curto demais"})[0]
+    assert not ev._chk_400({"content": ("the quick brown fox jumps over the lazy dog and keeps running " * 60)})[0]       # não é português
+    assert not ev._chk_400({"content": _PT_TEXT + " Por favor, envie o arquivo com os dados."})[0]
+    assert ev._chk_format({"content": ' {"cidade": "Recife", "pontos": ["a", "b", "c"]} '})[0]
+    for bad in ('```json\n{"cidade": "R", "pontos": ["a","b","c"]}\n```', 'Aqui está: {"cidade": "R", "pontos": ["a","b","c"]}', '{"cidade": "R", "pontos": ["a","b"]}', '{"cidade": "R", "pontos": ["a","b","c"], "extra": 1}'):
+        assert not ev._chk_format({"content": bad})[0]
+    assert ev._chk_nonempty({"content": "ok"})[0] and not ev._chk_nonempty({"content": "  "})[0] and not ev._chk_nonempty({"content": None})[0]
+
+
+def test_eval_runs_four_cases_and_stores_rate_latency_tokens_and_cost(conn, secdir, evalmode):
+    conn.execute("UPDATE llm_settings SET contingency=false")
+    p = _open_paid(conn, secdir)                                                           # Haiku 0,10/0,50
+    eid, why = evalmode.start(conn, p, call=_good_call)
+    assert why is None
+    e = conn.execute("SELECT * FROM llm_evals WHERE id=%s", (eid,)).fetchone()
+    assert e["status"] == "concluida" and e["passed"] == 4 and e["total"] == 4 and e["tokens"] == 42 + 740 + 70 + 12 and e["avg_latency_ms"] is not None
+    assert float(e["cost_usd"]) == round((130 * 0.10 + 734 * 0.50) / 1_000_000, 6)
+    cases = conn.execute("SELECT case_name, ok FROM llm_eval_cases WHERE eval_id=%s ORDER BY id", (eid,)).fetchall()
+    assert [c["case_name"] for c in cases] == ["chamar_tool", "escrever_400_palavras", "seguir_formato", "resposta_nao_vazia"] and all(c["ok"] for c in cases)
+    assert evalmode.passes(conn, p["id"]) == (True, "")
+    row = next(r for r in evalmode.table(conn) if r["perfil_id"] == p["id"])
+    assert row["avaliacao"]["taxa"] == 1.0 and row["avaliacao"]["aprovado"] and len(row["avaliacao"]["casos"]) == 4
+
+
+def test_eval_failures_are_recorded_and_gate_enabling(conn, secdir, evalmode):
+    from meridiano.engine import llm
+    conn.execute("UPDATE llm_settings SET contingency=false")
+    p = _open_paid(conn, secdir)
+
+    def flaky(c, emp, prof, messages, tools=None):
+        if tools:
+            raise llm.RateLimited("m", 5)                                                  # não chamou a tool (429)
+        return _good_call(c, emp, prof, messages, tools)
+    eid, _ = evalmode.start(conn, p, call=flaky)
+    ok, why = evalmode.passes(conn, p["id"])
+    assert not ok and "chamar_tool" in why                                                 # 3 de 4 (75%), mas caso obrigatório falhou
+    conn.execute("UPDATE llm_evals SET status='concluida'")
+    def empty(c, emp, prof, messages, tools=None):
+        e = llm.EmptyResponse("m"); e.usage = (10, 3000); raise e
+    eid2, _ = evalmode.start(conn, p, call=empty)
+    ev = conn.execute("SELECT * FROM llm_evals WHERE id=%s", (eid2,)).fetchone()
+    assert ev["passed"] == 0 and ev["tokens"] == 4 * 3010
+    assert "vazia" in conn.execute("SELECT detail FROM llm_eval_cases WHERE eval_id=%s ORDER BY id LIMIT 1", (eid2,)).fetchone()["detail"]
+    low = lambda c, emp, prof, messages, tools=None: (_good_call(c, emp, prof, messages, tools) if tools or "ok" in messages[0]["content"] else {"role": "assistant", "content": "x"})
+    evalmode.start(conn, p, call=low)                                                      # 2 de 4: abaixo do mínimo
+    ok, why = evalmode.passes(conn, p["id"])
+    assert not ok and "2/4" in why
+
+
+def test_eval_ready_rules_and_guards(conn, secdir, evalmode):
+    from meridiano.engine import llm
+    p = _paid(conn)
+    assert llm.eval_ready(conn, p)[1].startswith("sem chave")
+    (secdir / "llm-nous").write_text("chave-de-teste-123456")
+    assert "contingência" in llm.eval_ready(conn, p)[1]                                    # pago não é chamado na contingência
+    conn.execute("UPDATE llm_settings SET contingency=false")
+    assert llm.eval_ready(conn, p)[0]
+    conn.execute("INSERT INTO usage_log(model,cost_usd) VALUES ('x',5)")
+    assert "teto global" in llm.eval_ready(conn, p)[1]
+    free = conn.execute("SELECT * FROM llm_profiles WHERE is_free AND enabled LIMIT 1").fetchone()
+    assert llm.eval_ready(conn, free)[0]                                                   # grátis usa a chave nous
+    conn.execute("INSERT INTO llm_evals(profile_id,total) VALUES (%s,4)", (free["id"],))
+    assert evalmode.start(conn, free, call=_good_call)[1] == "este perfil já está em avaliação"
+    conn.execute("UPDATE llm_evals SET started_at = now() - interval '20 minutes'")
+    assert evalmode.start(conn, free, call=_good_call)[1] is None                         # avaliação travada é descartada
+    assert conn.execute("SELECT status FROM llm_evals ORDER BY id LIMIT 1").fetchone()["status"] == "erro"
+
+
+def test_api_adopt_candidate_evaluate_and_enable_only_after_passing(conn, secdir, evalmode, monkeypatch):
+    from meridiano.engine import llm, llm_eval
+    c = _llm_client(conn, monkeypatch)
+    A, R = {"X-Admin-Token": "admin"}, {"X-Token": "leitura"}
+    (secdir / "llm-openrouter").write_text("chave-or-123456")
+    cid = conn.execute("INSERT INTO llm_candidates(source,base_url,model,key_name,name,free,tools) VALUES ('descoberta','https://openrouter.ai/api/v1','nvidia/nemotron:free','openrouter','Nemotron',true,'sim') RETURNING id").fetchone()["id"]
+    assert c.get("/api/llm/candidates").status_code == 401 and c.post(f"/api/llm/candidates/{cid}/adopt", headers=R).status_code == 401
+    lst = c.get("/api/llm/candidates", headers=R).json()
+    assert lst[0]["modelo"] == "nvidia/nemotron:free" and lst[0]["chave_configurada"] is True and "chave-or" not in str(lst)
+    monkeypatch.setattr(llm_eval.llm, "call", _good_call)
+    monkeypatch.setattr(llm_eval, "start", lambda conn_, p, call=_good_call, _s=llm_eval.start: _s(conn_, p, call=_good_call))
+    r = c.post(f"/api/llm/candidates/{cid}/adopt", headers=A)
+    assert r.status_code == 200 and r.json()["avaliacao_id"]
+    pid = r.json()["perfil_id"]
+    prof = conn.execute("SELECT * FROM llm_profiles WHERE id=%s", (pid,)).fetchone()
+    assert prof["enabled"] is False and prof["needs_eval"] and prof["is_free"] and prof["label"] == "OpenRouter · Nemotron (grátis)"
+    assert c.post(f"/api/llm/candidates/{cid}/adopt", headers=A).status_code == 404       # já tratado
+    ev = c.get("/api/llm/evals", headers=R).json()
+    row = next(x for x in ev if x["perfil_id"] == pid)
+    assert row["avaliacao"]["aprovado"] and row["exige_avaliacao"]
+    assert c.patch(f"/api/llm/profiles/{pid}", json={"enabled": True}, headers=A).status_code == 200      # passou na avaliação + clique do admin
+    # perfil novo SEM avaliação concluída não liga
+    cid2 = conn.execute("INSERT INTO llm_candidates(source,base_url,model,key_name,name,free,tools) VALUES ('descoberta','https://openrouter.ai/api/v1','outro/modelo:free','openrouter','Outro',true,'sim') RETURNING id").fetchone()["id"]
+    monkeypatch.setattr(llm_eval, "start", lambda conn_, p, call=None: (None, "sem avaliação neste teste"))
+    r2 = c.post(f"/api/llm/candidates/{cid2}/adopt", headers=A).json()
+    assert r2["aviso"] == "sem avaliação neste teste"
+    bad = c.patch(f"/api/llm/profiles/{r2['perfil_id']}", json={"enabled": True}, headers=A)
+    assert bad.status_code == 400 and "avalie o modelo" in bad.json()["detail"]
+    assert c.post(f"/api/llm/candidates/{cid2}/discard", headers=A).status_code == 404    # já adotado
+
+
+def test_api_discover_evaluate_and_profile_creation_requires_eval(conn, secdir, monkeypatch, evalmode):
+    from meridiano.engine import llm_catalog
+    c = _llm_client(conn, monkeypatch)
+    A, R = {"X-Admin-Token": "admin"}, {"X-Token": "leitura"}
+    monkeypatch.setattr(llm_catalog, "fetch", lambda key, base: ([{"model": "g/gemma:free", "name": "Gemma", "context_length": 1, "tools": "sim", "key_name": key, "base_url": base}] if key == "openrouter" else [], ""))
+    assert c.post("/api/llm/discover", headers=R).status_code == 401
+    d = c.post("/api/llm/discover", headers=A).json()
+    assert [x["model"] for x in d["novos"]] == ["g/gemma:free"]
+    base = {"label": "Perfil manual", "provider": "openai_compat", "base_url": "https://openrouter.ai/api/v1", "model": "m/manual:free", "key_name": "openrouter", "price_in_per_m": 0, "price_out_per_m": 0, "is_free": True}
+    pid = c.post("/api/llm/profiles", json=base, headers=A).json()["id"]
+    assert c.patch(f"/api/llm/profiles/{pid}", json={"enabled": True}, headers=A).status_code == 400    # perfil criado por API também exige avaliação
+    assert c.post(f"/api/llm/profiles/{pid}/evaluate", headers=A).status_code == 400                    # sem chave: motivo claro
+    assert c.post("/api/llm/profiles/99999/evaluate", headers=A).status_code == 404
+    seeded = conn.execute("SELECT id FROM llm_profiles WHERE is_free AND enabled LIMIT 1").fetchone()["id"]
+    c.post("/api/llm/profiles/%d/evaluate" % seeded, headers={"X-Admin-Token": "errado"})
+    assert conn.execute("SELECT needs_eval FROM llm_profiles WHERE id=%s", (seeded,)).fetchone()["needs_eval"] is False   # os perfis que já existiam não precisam de avaliação
+
+
+def test_agents_can_propose_models_but_never_enable_them(conn, secdir, monkeypatch):
+    from meridiano.engine import seed, tools
+    seed.seed(conn)
+    ceo = conn.execute("SELECT * FROM employees WHERE slug='ceo'").fetchone()
+    tools.run_tool(conn, ceo, "hire_employee", {"name": "Ana", "role": "Analista de Oportunidades", "area": "Mercado", **HIRE})
+    tools.run_tool(conn, ceo, "hire_employee", {"name": "Bia", "role": "Redatora", "area": "Conteúdo", **HIRE})
+    ana = conn.execute("SELECT * FROM employees WHERE slug='ana'").fetchone()
+    bia = conn.execute("SELECT * FROM employees WHERE slug='bia'").fetchone()
+    assert "propose_llm_profile" in [t["function"]["name"] for t in tools.TOOL_DEFS]
+    args = {"model": "google/gemma-4-31b-it:free", "base_url": "https://openrouter.ai/api/v1", "reason": "Grátis no OpenRouter, suporta tools; fonte: página de modelos do OpenRouter."}
+    assert tools.run_tool(conn, bia, "propose_llm_profile", args).startswith("erro: só o Analista")
+    assert tools.run_tool(conn, ana, "propose_llm_profile", {**args, "base_url": "https://evil.example.com/v1"}).startswith("erro: o endereço")
+    assert tools.run_tool(conn, ana, "propose_llm_profile", {**args, "reason": "curto"}).startswith("erro: explique")
+    assert tools.run_tool(conn, ana, "propose_llm_profile", {**args, "model": "tem espaço"}).startswith("erro: informe o id")
+    assert tools.run_tool(conn, ana, "propose_llm_profile", args).startswith("proposta")
+    assert "já está" in tools.run_tool(conn, ana, "propose_llm_profile", args)
+    for i in range(2):
+        assert tools.run_tool(conn, ana, "propose_llm_profile", {**args, "model": f"m/x{i}:free"}).startswith("proposta")
+    assert tools.run_tool(conn, ana, "propose_llm_profile", {**args, "model": "m/x9:free"}).startswith("erro: no máximo 3")
+    cand = conn.execute("SELECT * FROM llm_candidates WHERE model='google/gemma-4-31b-it:free'").fetchone()
+    assert cand["source"] == "agente" and cand["proposer_id"] == ana["id"] and cand["free"] is False and cand["key_name"] == "openrouter"
+    assert conn.execute("SELECT COUNT(*) AS n FROM llm_profiles WHERE model LIKE 'google/gemma%'").fetchone()["n"] == 0     # nada vira perfil sozinho
+    # o dono adota: nasce NÃO-grátis, com limite de US$ 1 e exigindo avaliação
+    c = _llm_client(conn, monkeypatch)
+    r = c.post(f"/api/llm/candidates/{cand['id']}/adopt", headers={"X-Admin-Token": "admin"})
+    assert r.status_code == 200
+    p = conn.execute("SELECT * FROM llm_profiles WHERE id=%s", (r.json()["perfil_id"],)).fetchone()
+    assert p["is_free"] is False and p["enabled"] is False and p["needs_eval"] and float(p["daily_usd_cap"]) == 1.0 and p["notes"].startswith("sugerido por agente")
+    assert r.json()["aviso"]                                                               # sem chave/contingência: não avaliou, explica o porquê
+
+
+def test_token_can_come_from_mercadopago_json_and_the_panel_token_wins(secdir, monkeypatch):
+    from meridiano.engine import secrets_store as ss
+    monkeypatch.setattr(ss, "verify", lambda t: ("ok", "token aceito pelo Mercado Pago"))
+    tok_json = "APP_USR-" + "j1s2o3n4" * 4
+    f = secdir / "mercadopago.json"
+    f.write_text(_json.dumps({"access_token": tok_json})); f.chmod(0o644)
+    assert ss.configured() and ss.read_token() == tok_json
+    assert ss.ensure_private() and oct(f.stat().st_mode & 0o777) == "0o600"                      # permissão frouxa é corrigida
+    st = ss.status()
+    assert st["configurado"] and tok_json not in str(st)
+    tok_panel = "APP_USR-" + "p4n3l2x1" * 4
+    ok, _msg, _meta = ss.save_token(tok_panel)                                                    # o painel grava mp-token: ele passa a valer, sem dois tokens
+    assert ok and ss.read_token() == tok_panel
+    ss.remove_token()
+    assert not ss.configured() and not f.exists()                                                  # Remover limpa todas as fontes
+    f.write_text("{ isto não é json"); assert not ss.configured() and "não parece" in ss.problem()

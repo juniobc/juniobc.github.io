@@ -73,3 +73,5 @@ SESSION_HOURS = int(env("SESSION_HOURS", "12"))
 OWNER_TURNS_PER_DAY = int(env("OWNER_TURNS_PER_DAY", "30"))   # turnos extras por dia disparados por mensagem do dono
 OWNER_MSGS_PER_DAY = int(env("OWNER_MSGS_PER_DAY", "200"))
 OWNER_MSG_MAX = int(env("OWNER_MSG_MAX", "2000"))
+EVAL_MIN_RATE = float(env("EVAL_MIN_RATE", "0.75"))          # taxa mínima de sucesso na avaliação para um perfil novo poder ser ligado
+EVAL_MAX_RUNNING = int(env("EVAL_MAX_RUNNING", "2"))         # avaliações ao mesmo tempo

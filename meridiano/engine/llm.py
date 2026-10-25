@@ -15,7 +15,7 @@ class BudgetExceeded(Exception):
 
 
 class EmptyResponse(Exception):
-    pass
+    usage = (0, 0)   # tokens gastos na resposta vazia (para a avaliação de modelos)
 
 
 class RateLimited(Exception):
@@ -195,6 +195,21 @@ def resolve(conn, emp):
     return {"profile": fb[0], "wanted": wanted, "reason": why if wanted is not None and wanted["id"] != fb[0]["id"] else ""}
 
 
+def eval_ready(conn, p, st=None):
+    """(ok, motivo): dá para chamar este perfil numa avaliação (mesmo desligado)? Pago só fora da contingência e dentro do teto global."""
+    st = st or settings(conn)
+    if not host_ok(p["base_url"]):
+        return False, "endereço fora da lista permitida"
+    if not key_configured(p):
+        return False, f"sem chave configurada ({p['key_name']})"
+    if not p["is_free"]:
+        if st["contingency"]:
+            return False, "modo contingência ligado (só perfis grátis são chamados)"
+        if spent_today(conn) >= float(st["global_usd_cap"]):
+            return False, "teto global de gasto do dia atingido"
+    return True, ""
+
+
 def best_profile(conn):
     """Melhor perfil disponível agora para cargos de decisão: o pago mais caro (proxy de qualidade) que passa em todas as regras, senão o grátis padrão."""
     st = settings(conn)
@@ -327,7 +342,10 @@ def call(conn, employee_id, p, messages, tools=None):
                  (employee_id, model, p["id"], pt, ct, cost_usd(p, pt, ct), not empty,
                   "resposta vazia (sem content nem tool_calls; provável max_tokens gasto pensando)" if empty else None))
     if empty:
-        raise EmptyResponse(model)
+        e = EmptyResponse(model)
+        e.usage = (pt, ct)
+        raise e
+    msg["_usage"] = (pt, ct)     # só para a avaliação; o agente usa content/tool_calls
     return msg
 
 

@@ -35,6 +35,9 @@ SPECS = [
      "parameters": {"type": "object", "properties": {"to": {"type": "string"}, "body": {"type": "string"}}, "required": ["body"]}},
     {"name": "hire_employee", "description": "Contrata um agente novo. Só cargos de chefia. Exige motivo.",
      "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "role": {"type": "string"}, "area": {"type": "string"}, "instructions": {"type": "string", "description": "completas: função, como trabalha, o que entrega e como se mede"}, "reason": {"type": "string"}, "deliverable": {"type": "string", "description": "entrega mensurável por dia, ex.: 2 artigos"}, "llm_profile": {"type": "string", "description": "opcional: rótulo de um perfil de list_llm_profiles que esteja liberado agora. Padrão: grátis"}}, "required": ["name", "role", "area", "instructions", "reason", "deliverable"]}},
+    {"name": "propose_llm_profile", "description": "Propõe ao dono um modelo de LLM melhor ou mais barato que você achou pesquisando na web (Analista de Oportunidades, Presidente ou CEO). Só provedores permitidos (Nous, OpenRouter, OpenAI, Anthropic). Você NÃO liga nada: o dono adota, a empresa avalia o modelo e só então ele liga.",
+     "parameters": {"type": "object", "properties": {"model": {"type": "string", "description": "id exato do modelo na API do provedor"}, "base_url": {"type": "string", "description": "ex.: https://openrouter.ai/api/v1"}, "reason": {"type": "string", "description": "por que ajuda, preço e fonte"},
+                    "price_in_per_m": {"type": "number", "description": "USD por milhão de tokens de entrada (0 se grátis)"}, "price_out_per_m": {"type": "number"}}, "required": ["model", "base_url", "reason"]}},
     {"name": "list_llm_profiles", "description": "Lista os perfis de LLM (modelo, preço por milhão de tokens, se é grátis) e se cada um está liberado agora para contratação. Só leitura; quem liga ou desliga é o dono.",
      "parameters": {"type": "object", "properties": {}}},
     {"name": "team_review", "description": "Presidente ou CEO registram a revisão de equipe (a cada 30 turnos): quem entrega, quem não, e o que muda. Só vale depois de contratar até a meta mínima.",
@@ -460,6 +463,8 @@ def _record_activity(conn, me, name, args, out):
         activity(conn, me["id"], "contratando", f"Contratou {str(args.get('name', ''))[:60]}")
     elif name == "fire_employee":
         activity(conn, me["id"], "demitindo", f"Demitiu {str(args.get('slug', ''))[:60]}")
+    elif name == "propose_llm_profile":
+        activity(conn, me["id"], "planejando", f"Propôs modelo {str(args.get('model', ''))[:50]}")
     elif name == "reply_owner":
         activity(conn, me["id"], "conversando", "Respondeu ao dono")
     elif name in ("create_task", "complete_task", "ask_owner"):
@@ -470,6 +475,9 @@ def _run_tool(conn, me, name, args):
     try:
         if name == "web_search":
             return web_search(str(args["query"])[:200])
+        if name == "propose_llm_profile":
+            from . import llm_catalog
+            return llm_catalog.propose(conn, me, args)
         if name == "list_llm_profiles":
             st = llm.settings(conn)
             rows = conn.execute("SELECT * FROM llm_profiles ORDER BY is_free DESC, id").fetchall()

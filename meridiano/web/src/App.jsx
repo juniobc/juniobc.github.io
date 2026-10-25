@@ -16,7 +16,7 @@ export default function App() {
     if (auth) return;
     api('auth/me').then(() => setAuth(true)).catch(() => {});
   }, []);
-  const [d, setD] = useState({ state: null, emps: [], msgs: [], tasks: [], prods: [], ledger: [], reqs: [], acts: [], hist: [], engine: null, loja: [], opps: [], orders: [], lojaStatus: null, llm: null, me: null, llmKeys: [], chat: null });
+  const [d, setD] = useState({ state: null, emps: [], msgs: [], tasks: [], prods: [], ledger: [], reqs: [], acts: [], hist: [], engine: null, loja: [], opps: [], orders: [], lojaStatus: null, llm: null, me: null, llmKeys: [], chat: null, evals: [], cands: [] });
   const [err, setErr] = useState('');
   const [loginErr, setLoginErr] = useState('');
   const [tab, setTab] = useState(() => { try { return new URLSearchParams(window.location.search).get('aba') === 'config' ? 'cfg' : 'esc'; } catch { return 'esc'; } });
@@ -38,10 +38,10 @@ export default function App() {
     let on = true;
     const load = async () => {
       try {
-        const [state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps, orders, lojaStatus, llm, me, llmKeys, chat] = await Promise.all(
-          ['state', 'employees', 'messages?limit=40', 'tasks', 'products', 'ledger', 'owner-requests', 'activity?limit=30', 'history', 'engine', 'store/products', 'opportunities', 'orders', 'store/status', 'llm', 'auth/me', 'llm/keys', 'chat?limit=60'].map(api));
+        const [state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps, orders, lojaStatus, llm, me, llmKeys, chat, evals, cands] = await Promise.all(
+          ['state', 'employees', 'messages?limit=40', 'tasks', 'products', 'ledger', 'owner-requests', 'activity?limit=30', 'history', 'engine', 'store/products', 'opportunities', 'orders', 'store/status', 'llm', 'auth/me', 'llm/keys', 'chat?limit=60', 'llm/evals', 'llm/candidates'].map(api));
         setCsrf(me.csrf);
-        if (on) { setD({ state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps, orders, lojaStatus, llm, me, llmKeys, chat }); setErr(''); }
+        if (on) { setD({ state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps, orders, lojaStatus, llm, me, llmKeys, chat, evals, cands }); setErr(''); }
       } catch (e) {
         if (e.message === '401') { setToken(''); setLoginErr('Token inválido. Confira e tente de novo.'); setAuth(false); } else setErr('Sem conexão com o servidor.');
       }
@@ -146,7 +146,7 @@ export default function App() {
       </>}
 
       {tab === 'chat' && <Chat chat={d.chat} emps={d.emps} reload={() => setRev((x) => x + 1)} />}
-      {tab === 'mod' && <Models llm={d.llm} me={d.me} reload={() => setRev((x) => x + 1)} />}
+      {tab === 'mod' && <Models llm={d.llm} me={d.me} evals={d.evals} cands={d.cands} reload={() => setRev((x) => x + 1)} />}
       {tab === 'cfg' && <Settings me={d.me} reqs={d.reqs} llmKeys={d.llmKeys} reload={() => setRev((x) => x + 1)} goto={setTab} />}
     </div>
   );

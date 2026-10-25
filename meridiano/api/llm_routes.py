@@ -3,7 +3,7 @@ Chaves nunca são devolvidas: só "configurada: sim/não"."""
 from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from ..engine import google_auth, llm
+from ..engine import google_auth, llm, llm_catalog, llm_eval
 
 
 class NewProfile(BaseModel):
@@ -101,8 +101,8 @@ def register(app, read_auth, admin_auth, conn_fn):
             raise HTTPException(400, "perfil grátis não pode ter preço")
         c = conn_fn()
         try:
-            r = c.execute("INSERT INTO llm_profiles(label,provider,base_url,model,key_name,price_in_per_m,price_out_per_m,supports_tools,is_free,enabled,daily_usd_cap,notes) "
-                          "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,false,%s,%s) RETURNING id",
+            r = c.execute("INSERT INTO llm_profiles(label,provider,base_url,model,key_name,price_in_per_m,price_out_per_m,supports_tools,is_free,enabled,daily_usd_cap,notes,needs_eval) "
+                          "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,false,%s,%s,true) RETURNING id",
                           (b.label.strip(), b.provider, b.base_url.rstrip("/"), b.model.strip(), b.key_name, b.price_in_per_m, b.price_out_per_m, b.supports_tools,
                            b.is_free, b.daily_usd_cap, b.notes)).fetchone()
         except Exception:
@@ -127,6 +127,10 @@ def register(app, read_auth, admin_auth, conn_fn):
                 raise HTTPException(400, f"configure primeiro a chave '{p['key_name']}' (campo de chave do painel ou arquivo llm-{p['key_name']})")
             if not new["daily_usd_cap"] or float(new["daily_usd_cap"]) <= 0:
                 raise HTTPException(400, "defina o limite diário em USD antes de ligar um perfil pago")
+        if new["enabled"] and not p["enabled"] and p["needs_eval"]:   # perfil novo: só liga depois de passar na avaliação
+            ok_eval, why_eval = llm_eval.passes(c, pid)
+            if not ok_eval:
+                raise HTTPException(400, why_eval)
         if new["enabled"] and not p["supports_tools"]:
             raise HTTPException(400, "perfil sem suporte a tools não pode ser ligado")
         if not new["enabled"] and p["is_free"] and p["enabled"]:   # sempre sobra ao menos um grátis ligado
@@ -161,3 +165,65 @@ def register(app, read_auth, admin_auth, conn_fn):
             raise HTTPException(400, msg)
         google_auth.event(conn_fn(), "chave_salva", detail=f"llm-{key_name}")
         return {"configurada": True}
+
+    # ------------------------------------------------------------ descobrir e avaliar modelos
+    @app.post("/api/llm/discover", dependencies=[Depends(admin_auth)])
+    def discover():
+        """Consulta /models da Nous e do OpenRouter e lista candidatos grátis com tools que ainda não são perfil."""
+        r = llm_catalog.discover(conn_fn())
+        google_auth.event(conn_fn(), "modelos_descobertos", detail=f"{len(r['novos'])} novo(s)")
+        return r
+
+    @app.get("/api/llm/candidates", dependencies=[Depends(read_auth)])
+    def candidates():
+        rows = conn_fn().execute("SELECT c.*, e.name AS proposer FROM llm_candidates c LEFT JOIN employees e ON e.id=c.proposer_id WHERE c.status='novo' ORDER BY c.source DESC, c.id DESC LIMIT 200").fetchall()
+        return [{"id": r["id"], "origem": r["source"], "propositor": r["proposer"], "modelo": r["model"], "nome": r["name"], "provedor": r["key_name"], "gratis": r["free"], "tools": r["tools"],
+                 "contexto": r["context_length"], "preco_entrada": float(r["price_in_per_m"]), "preco_saida": float(r["price_out_per_m"]), "motivo": r["reason"],
+                 "chave_configurada": llm.key_configured({"key_name": r["key_name"]})} for r in rows]
+
+    @app.post("/api/llm/candidates/{cid}/adopt", dependencies=[Depends(admin_auth)])
+    def adopt(cid: int):
+        """Cria o perfil DESLIGADO (exige avaliação para ligar) e já inicia a avaliação padrão."""
+        c = conn_fn()
+        cand = c.execute("SELECT * FROM llm_candidates WHERE id=%s AND status='novo'", (cid,)).fetchone()
+        if not cand:
+            raise HTTPException(404, "candidato não existe ou já foi tratado")
+        if not llm.host_ok(cand["base_url"]):
+            raise HTTPException(400, "endereço fora da lista permitida")
+        brand = {"nous": "Nous", "openrouter": "OpenRouter", "openai": "OpenAI direta", "anthropic": "Anthropic direta"}.get(cand["key_name"], cand["key_name"])
+        label = f"{brand} · {cand['name'][:60]}" + (" (grátis)" if cand["free"] else "")
+        try:
+            p = c.execute("INSERT INTO llm_profiles(label,provider,base_url,model,key_name,price_in_per_m,price_out_per_m,supports_tools,is_free,enabled,daily_usd_cap,notes,needs_eval) "
+                          "VALUES (%s,%s,%s,%s,%s,%s,%s,true,%s,false,%s,%s,true) RETURNING *",
+                          (label, cand["provider"], cand["base_url"], cand["model"], cand["key_name"], cand["price_in_per_m"], cand["price_out_per_m"], cand["free"],
+                           None if cand["free"] else 1.00, ("sugerido por agente: " + cand["reason"])[:300] if cand["source"] == "agente" else "descoberto no catálogo do provedor")).fetchone()
+        except Exception:
+            raise HTTPException(409, "já existe um perfil com esse nome ou com esse endereço e modelo")
+        c.execute("UPDATE llm_candidates SET status='adotado', profile_id=%s WHERE id=%s", (p["id"], cid))
+        eid, why = llm_eval.start(c, p)
+        google_auth.event(c, "modelo_adotado", detail=p["model"])
+        return {"perfil_id": p["id"], "avaliacao_id": eid, "aviso": why}
+
+    @app.post("/api/llm/candidates/{cid}/discard", dependencies=[Depends(admin_auth)])
+    def discard(cid: int):
+        r = conn_fn().execute("UPDATE llm_candidates SET status='descartado' WHERE id=%s AND status='novo' RETURNING id", (cid,)).fetchone()
+        if not r:
+            raise HTTPException(404, "candidato não existe ou já foi tratado")
+        return {"ok": True}
+
+    @app.post("/api/llm/profiles/{pid}/evaluate", dependencies=[Depends(admin_auth)])
+    def evaluate(pid: int):
+        c = conn_fn()
+        p = c.execute("SELECT * FROM llm_profiles WHERE id=%s", (pid,)).fetchone()
+        if not p:
+            raise HTTPException(404, "perfil não existe")
+        eid, why = llm_eval.start(c, p)
+        if why:
+            raise HTTPException(400, why)
+        return {"avaliacao_id": eid}
+
+    @app.get("/api/llm/evals", dependencies=[Depends(read_auth)])
+    def evals():
+        c = conn_fn()
+        llm_eval.stale_cleanup(c)
+        return llm_eval.table(c)
