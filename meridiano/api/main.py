@@ -272,13 +272,14 @@ def add_entry(e: Entry):
     return {"id": r["id"], "caixa": db.cash_cents(c) / 100}
 
 
-from . import auth_routes, llm_routes, pay_routes, store_routes  # noqa: E402
+from . import auth_routes, chat_routes, llm_routes, pay_routes, store_routes  # noqa: E402
 
 app.include_router(store_routes.router)
 app.include_router(pay_routes.router)
 store_routes.register(app, read_auth, admin_auth, conn)
 llm_routes.register(app, read_auth, admin_auth, conn)
 auth_routes.register(app, read_auth, admin_auth, conn)
+chat_routes.register(app, read_auth, conn)
 
 _web = pathlib.Path(__file__).parent.parent / "web" / "dist"
 if _web.is_dir():

@@ -70,3 +70,6 @@ LLM_HOSTS = ("inference-api.nousresearch.com", "openrouter.ai", "api.openai.com"
 LLM_TIMEOUT = int(env("LLM_TIMEOUT", "120"))
 OWNER_EMAIL = env("OWNER_EMAIL", "juniobc@gmail.com").strip().lower()   # única conta Google que entra como administrador
 SESSION_HOURS = int(env("SESSION_HOURS", "12"))
+OWNER_TURNS_PER_DAY = int(env("OWNER_TURNS_PER_DAY", "30"))   # turnos extras por dia disparados por mensagem do dono
+OWNER_MSGS_PER_DAY = int(env("OWNER_MSGS_PER_DAY", "200"))
+OWNER_MSG_MAX = int(env("OWNER_MSG_MAX", "2000"))

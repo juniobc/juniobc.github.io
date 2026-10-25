@@ -2,11 +2,12 @@ import { useEffect, useState } from 'react';
 import Office from './Office.jsx';
 import Models from './Models.jsx';
 import Settings from './Settings.jsx';
+import Chat from './Chat.jsx';
 import Login from './Login.jsx';
 import { api, post, getToken, setToken, setCsrf } from './api.js';
 
 const brl = (n) => 'R$ ' + Number(n).toFixed(2).replace('.', ',');
-const TABS = ['Escritório', 'Tarefas', 'Produtos', 'Ideias', 'Caixa', 'Modelos', 'Configurações'];
+const TABS = [['esc', 'Escritório'], ['chat', 'Conversa'], ['tar', 'Tarefas'], ['prod', 'Produtos'], ['ideias', 'Ideias'], ['caixa', 'Caixa'], ['mod', 'Modelos'], ['cfg', 'Configurações']];
 const MP_REQUEST = 'Preciso do access token do Mercado Pago';
 
 export default function App() {
@@ -15,10 +16,10 @@ export default function App() {
     if (auth) return;
     api('auth/me').then(() => setAuth(true)).catch(() => {});
   }, []);
-  const [d, setD] = useState({ state: null, emps: [], msgs: [], tasks: [], prods: [], ledger: [], reqs: [], acts: [], hist: [], engine: null, loja: [], opps: [], orders: [], lojaStatus: null, llm: null, me: null, llmKeys: [] });
+  const [d, setD] = useState({ state: null, emps: [], msgs: [], tasks: [], prods: [], ledger: [], reqs: [], acts: [], hist: [], engine: null, loja: [], opps: [], orders: [], lojaStatus: null, llm: null, me: null, llmKeys: [], chat: null });
   const [err, setErr] = useState('');
   const [loginErr, setLoginErr] = useState('');
-  const [tab, setTab] = useState(() => { try { return new URLSearchParams(window.location.search).get('aba') === 'config' ? 6 : 0; } catch { return 0; } });
+  const [tab, setTab] = useState(() => { try { return new URLSearchParams(window.location.search).get('aba') === 'config' ? 'cfg' : 'esc'; } catch { return 'esc'; } });
   const [sel, setSel] = useState(null);
   const [card, setCard] = useState(null);
   const [now, setNow] = useState(Date.now());
@@ -37,10 +38,10 @@ export default function App() {
     let on = true;
     const load = async () => {
       try {
-        const [state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps, orders, lojaStatus, llm, me, llmKeys] = await Promise.all(
-          ['state', 'employees', 'messages?limit=40', 'tasks', 'products', 'ledger', 'owner-requests', 'activity?limit=30', 'history', 'engine', 'store/products', 'opportunities', 'orders', 'store/status', 'llm', 'auth/me', 'llm/keys'].map(api));
+        const [state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps, orders, lojaStatus, llm, me, llmKeys, chat] = await Promise.all(
+          ['state', 'employees', 'messages?limit=40', 'tasks', 'products', 'ledger', 'owner-requests', 'activity?limit=30', 'history', 'engine', 'store/products', 'opportunities', 'orders', 'store/status', 'llm', 'auth/me', 'llm/keys', 'chat?limit=60'].map(api));
         setCsrf(me.csrf);
-        if (on) { setD({ state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps, orders, lojaStatus, llm, me, llmKeys }); setErr(''); }
+        if (on) { setD({ state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps, orders, lojaStatus, llm, me, llmKeys, chat }); setErr(''); }
       } catch (e) {
         if (e.message === '401') { setToken(''); setLoginErr('Token inválido. Confira e tente de novo.'); setAuth(false); } else setErr('Sem conexão com o servidor.');
       }
@@ -64,17 +65,17 @@ export default function App() {
         <div><b>{s ? s.vendas : '—'}</b><span>Vendas registradas</span></div>
         <div><b>{s ? s.agentes : '—'}</b><span>Agentes</span></div>
       </div>
-      <nav>{TABS.map((t, i) => <button key={t} className={i === tab ? 'on' : ''} onClick={() => setTab(i)}>{t}</button>)}</nav>
+      <nav>{TABS.map(([id, label]) => <button key={id} className={id === tab ? 'on' : ''} onClick={() => setTab(id)}>{label}</button>)}</nav>
 
       {d.reqs.filter((r) => !r.done).length > 0 && (
         <section className="card"><strong>Pedidos para você, Junio</strong>
           {d.reqs.filter((r) => !r.done).map((r) => (r.body.startsWith(MP_REQUEST)
-            ? <p key={r.id}>{r.body} <button onClick={() => setTab(6)}>Abrir Configurações</button></p>
+            ? <p key={r.id}>{r.body} <button onClick={() => setTab('cfg')}>Abrir Configurações</button></p>
             : <p key={r.id}>{r.body} <small>({r.from_name || 'Sistema'})</small>{' '}
               <button onClick={() => post(`owner-requests/${r.id}/done`).catch(() => {})}>Feito</button></p>))}
         </section>)}
 
-      {tab === 0 && <>
+      {tab === 'esc' && <>
         <div className="card" aria-live="polite"><b>Agora:</b>{' '}
           {nowAct ? <>{nowAct.name}{nowAct.target_name ? ` → ${nowAct.target_name}` : ''}: {nowAct.text || nowAct.kind} <small>({ago(nowAct.started_at)})</small></> : 'ninguém agiu nos últimos 3 minutos.'}</div>
         {d.engine && <p className="note">Motor: {d.engine.vivo ? 'vivo' : 'PARADO'}
@@ -108,11 +109,11 @@ export default function App() {
         {s && <p className="note">Uso hoje: {s.uso_hoje.chamadas}/{s.uso_hoje.limite_chamadas} chamadas, {s.uso_hoje.tokens}/{s.uso_hoje.limite_tokens} tokens.</p>}
       </>}
 
-      {tab === 1 && <ul className="feed">{d.tasks.map((k) => (
+      {tab === 'tar' && <ul className="feed">{d.tasks.map((k) => (
         <li key={k.id}><b>{k.title}</b> <small>({k.status}) · {k.assignee}</small>{k.result && <><br />{k.result}</>}</li>))}
         {!d.tasks.length && <li className="note">Sem tarefas.</li>}</ul>}
 
-      {tab === 2 && <ul className="feed">{d.prods.map((p) => (
+      {tab === 'prod' && <ul className="feed">{d.prods.map((p) => (
         <li key={p.id}><b>{p.name}</b> <small>({p.status}{p.price_cents ? ` · ${brl(p.price_cents / 100)}` : ' · sem preço'})</small><br /><b>{p.secoes_total > 0 ? `${p.secoes_prontas} de ${p.secoes_total} seções` : 'sem plano de seções'}, {p.caracteres} caracteres</b><br />{p.description}
           {(() => { const l = d.loja.find((x) => x.id === p.id); if (!l) return null;
             return <p className="note">Loja: {l.publicado ? <a href={l.url} target="_blank" rel="noreferrer">página publicada</a> : 'página ainda não publicada'}
@@ -120,7 +121,7 @@ export default function App() {
           {p.content && <details><summary>Ver conteúdo</summary><pre style={{ whiteSpace: 'pre-wrap' }}>{p.content}</pre></details>}</li>))}
         {!d.prods.length && <li className="note">Nenhum produto ainda.</li>}</ul>}
 
-      {tab === 3 && <>
+      {tab === 'ideias' && <>
         <p className="note">Mesa de oportunidades: a empresa testa ideias rápido e descarta sem apego. Medições reais vêm do servidor (vendas confirmadas, visitas); o "aprendizado" é o relato do agente, não uma medição.</p>
         <ul className="feed">{d.opps.map((o) => (
           <li key={o.id}><b>{o.idea}</b> <small>({o.status} · esforço {o.effort} · risco {o.risk}{o.autor ? ` · ${o.autor}` : ''})</small>
@@ -129,7 +130,7 @@ export default function App() {
           {!d.opps.length && <li className="note">A mesa ainda está vazia. Os agentes vão propor ideias pesquisando.</li>}</ul>
       </>}
 
-      {tab === 4 && <>
+      {tab === 'caixa' && <>
         <p className="note">O caixa começa em R$ 0,00 e só muda quando o dono registra um valor realmente recebido. Falas dos agentes nunca contam.</p>
         <h2>Pedidos</h2>
         <ul className="feed">{d.orders.map((o) => (
@@ -144,8 +145,9 @@ export default function App() {
           {!d.ledger.length && <li className="note">Nenhum lançamento. Caixa: R$ 0,00.</li>}</ul>
       </>}
 
-      {tab === 5 && <Models llm={d.llm} me={d.me} reload={() => setRev((x) => x + 1)} />}
-      {tab === 6 && <Settings me={d.me} reqs={d.reqs} llmKeys={d.llmKeys} reload={() => setRev((x) => x + 1)} goto={setTab} />}
+      {tab === 'chat' && <Chat chat={d.chat} emps={d.emps} reload={() => setRev((x) => x + 1)} />}
+      {tab === 'mod' && <Models llm={d.llm} me={d.me} reload={() => setRev((x) => x + 1)} />}
+      {tab === 'cfg' && <Settings me={d.me} reqs={d.reqs} llmKeys={d.llmKeys} reload={() => setRev((x) => x + 1)} goto={setTab} />}
     </div>
   );
 }

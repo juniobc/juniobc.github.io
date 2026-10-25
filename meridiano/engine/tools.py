@@ -29,6 +29,8 @@ SPECS = [
     {"name": "list_products", "description": "Lista produtos com status, preço e tamanho do conteúdo.", "parameters": {"type": "object", "properties": {}}},
     {"name": "ask_owner", "description": "Registra UM pedido objetivo ao dono (Junio) para algo que só ele pode fazer (conta de vendedor, CPF, aprovação). Uma linha.",
      "parameters": {"type": "object", "properties": {"body": {"type": "string"}}, "required": ["body"]}},
+    {"name": "reply_owner", "description": "Responde ao dono (Junio) no chat da empresa. Curto, em português, honesto: o que você vai fazer, o que já fez ou por que não pode. Use para responder às MENSAGENS DO DONO.",
+     "parameters": {"type": "object", "properties": {"body": {"type": "string"}}, "required": ["body"]}},
     {"name": "post_message", "description": "Envia mensagem a um colega (slug) ou ao mural (to vazio). Só colegas internos.",
      "parameters": {"type": "object", "properties": {"to": {"type": "string"}, "body": {"type": "string"}}, "required": ["body"]}},
     {"name": "hire_employee", "description": "Contrata um agente novo. Só cargos de chefia. Exige motivo.",
@@ -458,6 +460,8 @@ def _record_activity(conn, me, name, args, out):
         activity(conn, me["id"], "contratando", f"Contratou {str(args.get('name', ''))[:60]}")
     elif name == "fire_employee":
         activity(conn, me["id"], "demitindo", f"Demitiu {str(args.get('slug', ''))[:60]}")
+    elif name == "reply_owner":
+        activity(conn, me["id"], "conversando", "Respondeu ao dono")
     elif name in ("create_task", "complete_task", "ask_owner"):
         activity(conn, me["id"], "planejando", {"create_task": "Criou tarefa", "complete_task": "Concluiu tarefa", "ask_owner": "Pediu algo ao dono"}[name])
 
@@ -540,6 +544,9 @@ def _run_tool(conn, me, name, args):
         if name == "list_products":
             rows = conn.execute("SELECT name,status,price_cents,length(content) AS n FROM products ORDER BY id").fetchall()
             return "\n".join(f"{r['name']} | {r['status']} | {'R$ %.2f' % (r['price_cents'] / 100) if r['price_cents'] else 'sem preço'} | {r['n']} caracteres" for r in rows) or "nenhum produto ainda"
+        if name == "reply_owner":
+            from . import owner_chat
+            return owner_chat.reply(conn, me, args["body"])
         if name == "ask_owner":
             body = str(args["body"]).strip()[:300]
             for r in conn.execute("SELECT id,body FROM owner_requests WHERE NOT done").fetchall():

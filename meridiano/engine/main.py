@@ -4,7 +4,7 @@ import logging
 import threading
 import time
 
-from . import config, db, llm, agent, seed, pacing, plan, secrets_store
+from . import config, db, llm, agent, owner_chat, seed, pacing, plan, secrets_store
 
 log = logging.getLogger("meridiano")
 
@@ -71,6 +71,47 @@ class Engine:
         pacing.beat_turn(conn, done)
         return bool(done), delay, reason
 
+    def dispatch_owner(self, conn, run=None, wait=False):
+        """Mensagem do dono: turno imediato do destinatário (sem esperar o rodízio), até OWNER_TURNS_PER_DAY por dia.
+        Nunca dois turnos do mesmo funcionário ao mesmo tempo; o que não coube no limite fica no contexto do próximo turno normal."""
+        if time.time() < self.pause_until:
+            return 0
+        left = config.OWNER_TURNS_PER_DAY - owner_chat.extra_turns_today(conn)
+        threads = []
+        for emp, ids in owner_chat.dispatch_plan(conn):
+            if left <= 0:
+                break
+            with self.lock:
+                if emp["id"] in self.running:
+                    continue                      # em turno agora: tenta de novo na próxima volta
+                self.running[emp["id"]] = emp["name"]
+            owner_chat.log_turn(conn, emp["id"], ids)
+            left -= 1
+            t = threading.Thread(target=self._extra_turn, args=(emp, run or agent.run_turn), daemon=True, name=f"dono-{emp['slug']}")
+            t.start()
+            threads.append(t)
+        if wait:
+            for t in threads:
+                t.join()
+        return len(threads)
+
+    def _extra_turn(self, emp, run):
+        conn = db.connect()
+        try:
+            run(conn, emp)
+            conn.execute("UPDATE engine_status SET turn_count=turn_count+1 WHERE id=1")
+            pacing.beat_turn(conn, emp["id"])
+        except llm.RateLimited:
+            with self.lock:
+                self.backoff = min(900, self.backoff * 2 or 60)
+                self.pause_until = time.time() + self.backoff
+            log.warning("429 do provedor no turno do dono; todos esperam %ss", self.backoff)
+        except Exception as e:
+            log.exception("erro no turno do dono de %s: %s", emp["slug"], e)
+        finally:
+            self.release(emp["id"])
+            conn.close()
+
     def worker(self, n):
         conn = db.connect()
         while not self.stop.is_set():
@@ -93,6 +134,10 @@ class Engine:
             if time.time() >= next_secrets:  # token por arquivo: lê sem reiniciar e reverifica a cada 60 s
                 secrets_store.refresh(conn)
                 next_secrets = time.time() + secrets_store.REVERIFY_SECONDS
+            try:
+                self.dispatch_owner(conn)     # mensagens do dono: turno imediato
+            except Exception as e:
+                log.exception("erro ao despachar mensagem do dono: %s", e)
             nxt = min(self.next_at.values()) - time.time() if self.next_at else 5
             pacing.beat_workers(conn, self.workers, self.snapshot(), max(0, int(nxt)) if self.next_at else 5, self.reason)
             if once:

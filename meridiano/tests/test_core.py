@@ -2489,3 +2489,133 @@ def test_google_oauth_file_path_is_configurable(g, tmp_path, monkeypatch):
     monkeypatch.setenv("GOOGLE_OAUTH_FILE", str(tmp_path / "nao-existe.json"))
     r = g.client.get("/api/auth/google/start")
     assert r.status_code == 503 and "não configurado" in r.text and _SEC not in r.text
+
+
+# ---------------------------------------------------------------- PR B: conversa do dono com a empresa
+def _chat_client(conn, monkeypatch):
+    monkeypatch.setenv("MERIDIANO_API_TOKEN", "leitura")
+    from meridiano.api import main
+    main._conn = conn
+    return TestClient(main.app)
+
+
+def test_chat_send_validation_auth_and_thread(conn, monkeypatch):
+    from meridiano.engine import seed
+    seed.seed(conn)
+    c = _chat_client(conn, monkeypatch)
+    R = {"X-Token": "leitura"}
+    assert c.post("/api/chat", json={"to": "ceo", "body": "oi"}).status_code == 401
+    assert c.get("/api/chat").status_code == 401
+    assert c.post("/api/chat", json={"to": "ceo", "body": "   "}, headers=R).status_code == 400
+    assert c.post("/api/chat", json={"to": "ceo", "body": "x" * 2001}, headers=R).status_code == 422
+    assert c.post("/api/chat", json={"to": "fantasma", "body": "oi"}, headers=R).status_code == 400
+    assert c.post("/api/chat", json={"to": "../x", "body": "oi"}, headers=R).status_code == 422
+    assert c.post("/api/chat", json={"to": "ceo", "body": "Priorize o produto 1"}, headers=R).status_code == 200
+    assert c.post("/api/chat", json={"to": "todos", "body": "Bom dia, equipe"}, headers=R).status_code == 200
+    t = c.get("/api/chat", headers=R).json()
+    assert [m["texto"] for m in t["mensagens"]] == ["Priorize o produto 1", "Bom dia, equipe"]
+    assert t["mensagens"][0]["para"] == "Rafael" and t["mensagens"][1]["para"] == "todos" and t["mensagens"][0]["recebida_por"] == []
+    assert t["limite_turnos_extras"] == 30 and t["turnos_extras_hoje"] == 0
+
+
+def test_chat_daily_message_cap(conn, monkeypatch):
+    from meridiano.engine import config, owner_chat, seed
+    seed.seed(conn)
+    monkeypatch.setattr(config, "OWNER_MSGS_PER_DAY", 2)
+    assert owner_chat.send(conn, "ceo", "a")[1] is None and owner_chat.send(conn, "ceo", "b")[1] is None
+    assert "limite diário" in owner_chat.send(conn, "ceo", "c")[1]
+
+
+def test_owner_message_goes_first_in_the_prompt_and_is_read_only_after_a_clean_turn(conn):
+    from meridiano.engine import agent, owner_chat, seed
+    seed.seed(conn)
+    ceo = conn.execute("SELECT * FROM employees WHERE slug='ceo'").fetchone()
+    pres = conn.execute("SELECT * FROM employees WHERE slug='presidente'").fetchone()
+    owner_chat.send(conn, "ceo", "Quero um produto de planilhas")
+    owner_chat.send(conn, "todos", "Foco total em vendas reais")
+    seen = {}
+
+    def fake(conn_, emp_id, model, messages, tools):
+        seen["prompt"] = messages[1]["content"]
+        return {"role": "assistant", "content": "ok"}
+
+    def boom(*a, **k):
+        raise RuntimeError("provedor caiu")
+    with pytest.raises(RuntimeError):
+        agent.run_turn(conn, ceo, chat=boom)
+    assert len(owner_chat.pending(conn, ceo["id"])) == 2                       # turno com erro: continua pendente
+    agent.run_turn(conn, ceo, chat=fake)
+    p = seen["prompt"]
+    assert p.startswith("MENSAGENS DO DONO") and "Quero um produto de planilhas" in p and "para todos" in p and "reply_owner" in p
+    assert p.index("MENSAGENS DO DONO") < p.index("Seu slug")
+    assert owner_chat.pending(conn, ceo["id"]) == []                           # recebida
+    assert [m["body"] for m in owner_chat.pending(conn, pres["id"])] == ["Foco total em vendas reais"]   # a presidente só vê a de todos
+    agent.run_turn(conn, ceo, chat=fake)
+    assert "MENSAGENS DO DONO" not in seen["prompt"]                           # não repete
+    t = owner_chat.thread(conn)
+    assert t[0]["recebida_por"] == ["Rafael"]
+
+
+def test_everyone_message_is_not_delivered_to_people_hired_later(conn):
+    from meridiano.engine import owner_chat, seed, tools
+    seed.seed(conn)
+    conn.execute("UPDATE employees SET created_at = now() - interval '1 hour'")
+    owner_chat.send(conn, "todos", "Aviso geral")
+    ceo = conn.execute("SELECT * FROM employees WHERE slug='ceo'").fetchone()
+    assert tools.run_tool(conn, ceo, "hire_employee", {"name": "Nova", "role": "Analista", "area": "A", **HIRE}).startswith("contratado")
+    nova = conn.execute("SELECT id FROM employees WHERE slug='nova'").fetchone()
+    assert owner_chat.pending(conn, nova["id"]) == []
+
+
+def test_reply_owner_tool_records_activity_and_is_rate_limited(conn):
+    from meridiano.engine import owner_chat, seed, tools
+    seed.seed(conn)
+    ceo = conn.execute("SELECT * FROM employees WHERE slug='ceo'").fetchone()
+    owner_chat.send(conn, "ceo", "Como vai?")
+    assert "reply_owner" in [t["function"]["name"] for t in tools.TOOL_DEFS]
+    assert tools.run_tool(conn, ceo, "reply_owner", {"body": "Vou escrever a seção 2 agora."}).startswith("resposta enviada")
+    assert tools.run_tool(conn, ceo, "reply_owner", {"body": ""}).startswith("erro")
+    r = conn.execute("SELECT * FROM owner_messages WHERE direction='empresa'").fetchone()
+    assert r["employee_id"] == ceo["id"] and r["reply_to"] is not None
+    assert conn.execute("SELECT kind FROM activity WHERE employee_id=%s ORDER BY id DESC LIMIT 1", (ceo["id"],)).fetchone()["kind"] == "conversando"
+    tools.run_tool(conn, ceo, "reply_owner", {"body": "segunda"}); tools.run_tool(conn, ceo, "reply_owner", {"body": "terceira"})
+    assert tools.run_tool(conn, ceo, "reply_owner", {"body": "quarta"}).startswith("erro")
+
+
+def test_owner_message_triggers_an_immediate_turn_with_daily_cap_and_no_double_run(conn, monkeypatch):
+    from meridiano.engine import config, owner_chat, seed
+    from meridiano.engine.main import Engine
+    seed.seed(conn)
+    ran = []
+    run = lambda c, emp: ran.append(emp["slug"])
+    eng = Engine()
+    assert eng.dispatch_owner(conn, run=run, wait=True) == 0                   # sem mensagem, sem turno
+    owner_chat.send(conn, "ceo", "Urgente")
+    assert eng.dispatch_owner(conn, run=run, wait=True) == 1 and ran == ["ceo"]
+    assert eng.dispatch_owner(conn, run=run, wait=True) == 0                   # a mesma mensagem não dispara de novo
+    assert eng.running == {}                                                   # liberou o funcionário
+    owner_chat.send(conn, "todos", "Bom dia")                                  # para todos: Presidente e CEO
+    assert eng.dispatch_owner(conn, run=run, wait=True) == 2 and sorted(ran[1:]) == ["ceo", "presidente"]
+    # limite diário
+    monkeypatch.setattr(config, "OWNER_TURNS_PER_DAY", 3)
+    owner_chat.send(conn, "ceo", "mais uma")
+    owner_chat.send(conn, "presidente", "e outra")
+    assert eng.dispatch_owner(conn, run=run, wait=True) == 0                   # já são 3 turnos extras hoje
+    assert len(owner_chat.pending(conn, conn.execute("SELECT id FROM employees WHERE slug='ceo'").fetchone()["id"])) >= 1   # fica para o turno normal
+
+
+def test_dispatch_skips_someone_already_in_turn_and_respects_429_pause(conn):
+    import time as _t
+    from meridiano.engine import owner_chat, seed
+    from meridiano.engine.main import Engine
+    seed.seed(conn)
+    ceo = conn.execute("SELECT * FROM employees WHERE slug='ceo'").fetchone()
+    owner_chat.send(conn, "ceo", "Urgente")
+    eng = Engine()
+    eng.running[ceo["id"]] = ceo["name"]                                       # CEO já está em turno
+    assert eng.dispatch_owner(conn, run=lambda c, e: None, wait=True) == 0
+    eng.running.clear()
+    eng.pause_until = _t.time() + 60                                           # 429 em andamento: ninguém roda
+    assert eng.dispatch_owner(conn, run=lambda c, e: None, wait=True) == 0
+    eng.pause_until = 0
+    assert eng.dispatch_owner(conn, run=lambda c, e: None, wait=True) == 1
