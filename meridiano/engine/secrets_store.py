@@ -218,8 +218,10 @@ def status():
         return {"configurado": False, "modo": None, "verificado": False, "verificado_em": None, "detalhe": None, "problema": prob,
                 "permissoes_ok": ensure_private(), "atualizado_em": None, "webhook_assinado": webhook_secret() is not None}
     m = _read_meta()
-    return {"configurado": True, "modo": m.get("modo") or ("teste" if read_token().startswith("TEST-") else "producao"), "verificado": bool(m.get("verificado")),
-            "verificado_em": m.get("verificado_em"), "detalhe": m.get("detalhe"), "problema": None, "permissoes_ok": ensure_private(), "atualizado_em": m.get("atualizado_em"), "webhook_assinado": webhook_secret() is not None}
+    token = read_token()
+    same = m.get("fp") == _fp(token)   # a verificação só vale para o token que foi verificado: arquivo trocado = não verificado até reverificar
+    return {"configurado": True, "modo": m.get("modo") if same and m.get("modo") else ("teste" if token.startswith("TEST-") else "producao"), "verificado": bool(m.get("verificado")) and same,
+            "verificado_em": m.get("verificado_em") if same else None, "detalhe": m.get("detalhe") if same else "aguardando a verificação do token atual", "problema": None, "permissoes_ok": ensure_private(), "atualizado_em": m.get("atualizado_em"), "webhook_assinado": webhook_secret() is not None}
 
 
 def import_store_file(conn):

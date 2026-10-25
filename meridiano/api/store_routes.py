@@ -60,6 +60,11 @@ def register(app, read_auth, admin_auth, conn_fn):
         s = store.get_settings(conn_fn())
         return {"seller_name": s.get("seller_name"), "contact_email": s.get("contact_email"), "pronta": store.store_ready(conn_fn())}
 
+    @app.get("/api/store/status", dependencies=[Depends(read_auth)])
+    def store_status():
+        """Loja aberta ou fechada, com o motivo, e o estado de cada produto."""
+        return store.store_status(conn_fn())
+
     @app.get("/api/store/products", dependencies=[Depends(read_auth)])
     def store_products():
         """Para o painel: o que falta para cada produto aparecer na loja."""
@@ -67,4 +72,6 @@ def register(app, read_auth, admin_auth, conn_fn):
         rows = c.execute("SELECT p.id,p.name,p.status,p.price_cents,s.slug,(s.product_id IS NOT NULL) AS tem_texto FROM products p "
                          "LEFT JOIN product_store s ON s.product_id=p.id ORDER BY p.id").fetchall()
         pub = {p["slug"] for p in store.published(c)}
-        return [dict(r, publicado=bool(r["slug"] in pub), url=f"/pub/loja/{r['slug']}/" if r["slug"] in pub else None) for r in rows]
+        st = {x["id"]: x for x in store.store_status(c)["produtos"]}
+        return [dict(r, publicado=bool(r["slug"] in pub), url=f"/pub/loja/{r['slug']}/" if r["slug"] in pub else None,
+                     aberto=st[r["id"]]["aberto"], motivo=st[r["id"]]["motivo"]) for r in rows]

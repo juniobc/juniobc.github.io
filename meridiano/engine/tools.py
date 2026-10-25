@@ -52,6 +52,12 @@ SPECS = [
                     "benefits": {"type": "array", "items": {"type": "string"}}, "audience": {"type": "string"},
                     "faq": {"type": "array", "items": {"type": "object", "properties": {"q": {"type": "string"}, "a": {"type": "string"}}}}},
                     "required": ["product_name", "headline", "subtitle", "pitch", "benefits", "audience", "faq"]}},
+    {"name": "read_store_page", "description": "Lê o texto de venda e o preço de um produto, como o cliente vai ver, para revisar antes da compra abrir.",
+     "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}}, "required": ["product_name"]}},
+    {"name": "approve_store_page", "description": "Presidente (ou o CEO, se a Presidente escreveu o texto): aprova a página de venda e o preço para a compra abrir. Nunca o autor do texto. Se o texto ou o preço mudar depois, é preciso aprovar de novo.",
+     "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "note": {"type": "string"}}, "required": ["product_name", "note"]}},
+    {"name": "request_store_rewrite", "description": "Revisor: devolve o texto de venda para reescrita, com o motivo (promessa exagerada, informação que o produto não entrega, texto confuso).",
+     "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "reason": {"type": "string"}}, "required": ["product_name", "reason"]}},
     {"name": "set_price", "description": "Presidente ou CEO definem o preço de venda de um produto (mínimo R$ 9,00, máximo R$ 1.000,00).",
      "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "price_brl": {"type": "number"}, "reason": {"type": "string"}}, "required": ["product_name", "price_brl", "reason"]}},
     {"name": "propose_opportunity", "description": "Registra uma ideia de como ganhar dinheiro de forma legítima na mesa de oportunidades. Sem spam, golpe, falsa promessa, dado pessoal ou contas de terceiros.",
@@ -278,11 +284,46 @@ def _write_store_copy(conn, me, args):
     conn.execute(
         "INSERT INTO product_store(product_id,slug,headline,subtitle,pitch,benefits,audience,faq,written_by) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) "
         "ON CONFLICT (product_id) DO UPDATE SET headline=EXCLUDED.headline, subtitle=EXCLUDED.subtitle, pitch=EXCLUDED.pitch, benefits=EXCLUDED.benefits, "
-        "audience=EXCLUDED.audience, faq=EXCLUDED.faq, written_by=EXCLUDED.written_by, updated_at=now()",
+        "audience=EXCLUDED.audience, faq=EXCLUDED.faq, written_by=EXCLUDED.written_by, updated_at=now(), review_status='pendente', review_note='', approved_by=NULL, approved_hash=NULL",
         (prod["id"], slug, fields["headline"].strip(), fields["subtitle"].strip(), fields["pitch"].strip(), json.dumps([b.strip() for b in fields["benefits"]], ensure_ascii=False),
          fields["audience"].strip(), json.dumps([{"q": str(i["q"]).strip(), "a": str(i["a"]).strip()} for i in fields["faq"]], ensure_ascii=False), me["id"]))
     falta = "" if prod["price_cents"] else " Falta definir o preço com set_price."
     return f"texto de venda de '{prod['name']}' salvo; página em /pub/loja/{slug}/ (aparece quando houver preço e a loja estiver identificada).{falta}"
+
+
+def _review_store(conn, me, name, args):
+    from . import store
+    prod = _find_product(conn, args["product_name"])
+    row = conn.execute("SELECT p.id,p.name,p.status,p.price_cents,s.slug,s.headline,s.subtitle,s.pitch,s.benefits,s.audience,s.faq,s.review_status,s.review_note,s.written_by "
+                       "FROM products p JOIN product_store s ON s.product_id=p.id WHERE p.id=%s", (prod["id"],)).fetchone() if prod else None
+    if not row:
+        return "erro: esse produto ainda não tem texto de venda"
+    store._parse_lists(row)
+    if name == "read_store_page":
+        secs = conn.execute("SELECT title FROM product_sections WHERE product_id=%s ORDER BY position", (row["id"],)).fetchall()
+        return cap(f"[{row['review_status']}] {row['name']} · {store.brl(row['price_cents']) if row['price_cents'] else 'SEM PREÇO'}\nTÍTULO: {row['headline']}\nSUBTÍTULO: {row['subtitle']}\n"
+                   f"APRESENTAÇÃO: {row['pitch']}\nBENEFÍCIOS: " + " | ".join(row["benefits"]) + f"\nPARA QUEM: {row['audience']}\nFAQ: " + " | ".join(f"{i['q']} -> {i['a']}" for i in row["faq"])
+                   + "\nO PRODUTO TEM: " + "; ".join(x["title"] for x in secs) + "\nConfira se cada promessa do texto está nessas seções.", 3000)
+    is_pres = re.search(r"presidente", me["role"], re.I)
+    is_ceo_ok = re.search(r"\bceo\b", me["role"], re.I) and row["written_by"] is not None and conn.execute("SELECT 1 FROM employees WHERE id=%s AND role ILIKE '%%presidente%%'", (row["written_by"],)).fetchone()
+    if not (is_pres or is_ceo_ok):
+        return "erro: só a Presidente revisa a página de venda (o CEO só quando a Presidente escreveu o texto)"
+    if row["written_by"] == me["id"]:
+        return "erro: quem escreveu o texto não pode revisá-lo: peça a outra pessoa"
+    if row["status"] != "pronto" or not row["price_cents"]:
+        return "erro: o produto precisa estar pronto e ter preço antes da revisão"
+    if name == "request_store_rewrite":
+        reason = str(args["reason"]).strip()
+        if len(reason) < 10:
+            return "erro: explique o que reescrever, com pelo menos 10 caracteres"
+        conn.execute("UPDATE product_store SET review_status='reescrever', review_note=%s, approved_by=NULL, approved_hash=NULL WHERE product_id=%s", (reason[:400], row["id"]))
+        return f"reescrita pedida para a página de '{row['name']}'"
+    note = str(args["note"]).strip()
+    if len(note) < 20:
+        return "erro: registre o que você conferiu (promessas x conteúdo do produto), com pelo menos 20 caracteres"
+    conn.execute("UPDATE product_store SET review_status='aprovada', review_note=%s, approved_by=%s, approved_hash=%s WHERE product_id=%s", (note[:400], me["id"], store.page_hash(row), row["id"]))
+    conn.execute("INSERT INTO messages(from_id,to_id,body) VALUES (%s,NULL,%s)", (me["id"], f"Página de venda de '{row['name']}' aprovada ({store.brl(row['price_cents'])}). A compra abre quando o token do Mercado Pago estiver verificado."))
+    return f"página de '{row['name']}' aprovada; a compra abre quando o resto estiver pronto"
 
 
 def _set_price(conn, me, args):
@@ -301,6 +342,7 @@ def _set_price(conn, me, args):
     if len(str(args.get("reason", "")).strip()) < 5:
         return "erro: informe o motivo do preço"
     conn.execute("UPDATE products SET price_cents=%s, updated_at=now() WHERE id=%s", (cents, prod["id"]))
+    conn.execute("UPDATE product_store SET review_status='pendente', approved_by=NULL, approved_hash=NULL WHERE product_id=%s", (prod["id"],))    # preço novo: nova revisão
     conn.execute("INSERT INTO messages(from_id,to_id,body) VALUES (%s,NULL,%s)", (me["id"], f"Preço de '{prod['name']}': {store.brl(cents)}. Motivo: {str(args['reason'])[:200]}"))
     return f"preço de '{prod['name']}' definido em {store.brl(cents)}"
 
@@ -388,6 +430,8 @@ def _record_activity(conn, me, name, args, out):
         activity(conn, me["id"], "planejando", {"propose_tool": "Propôs ferramenta", "approve_tool": "Revisou ferramenta", "run_custom_tool": "Usou ferramenta"}[name] + f" {str(args.get('name', ''))[:40]}")
     elif name in ("propose_opportunity", "update_opportunity"):
         activity(conn, me["id"], "planejando", ("Propôs oportunidade: " + str(args.get("idea", ""))[:70]) if name == "propose_opportunity" else f"Atualizou oportunidade {args.get('id')}")
+    elif name in ("read_store_page", "approve_store_page", "request_store_rewrite"):
+        activity(conn, me["id"], "planejando", {"read_store_page": "Leu a página de venda de ", "approve_store_page": "Revisou a página de venda de ", "request_store_rewrite": "Pediu reescrita da página de "}[name] + str(args.get("product_name", ""))[:60])
     elif name in ("write_store_copy", "set_price"):
         activity(conn, me["id"], "escrevendo_produto", ("Escreve texto de venda de " if name == "write_store_copy" else "Define preço de ") + str(args.get("product_name", ""))[:60])
     elif name == "write_section":
@@ -511,6 +555,8 @@ def _run_tool(conn, me, name, args):
         if name == "list_opportunities":
             rows = conn.execute("SELECT id,idea,status,effort,risk,needs_owner FROM opportunities ORDER BY id").fetchall()
             return "\n".join(f"[{r['id']}] ({r['status']}) {r['idea'][:80]} | esforço {r['effort']} | risco {r['risk']}" + (f" | precisa do dono: {r['needs_owner'][:60]}" if r["needs_owner"] else "") for r in rows) or "a mesa está vazia"
+        if name in ("read_store_page", "approve_store_page", "request_store_rewrite"):
+            return _review_store(conn, me, name, args)
         if name == "write_store_copy":
             return _write_store_copy(conn, me, args)
         if name == "set_price":

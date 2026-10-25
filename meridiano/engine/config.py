@@ -63,3 +63,5 @@ TEAM_REVIEW_EVERY = int(env("TEAM_REVIEW_EVERY", "30"))   # turnos entre revisõ
 MAX_TASKS_PER_PERSON = int(env("MAX_TASKS_PER_PERSON", "3"))
 PUBLIC_BASE_URL = env("PUBLIC_BASE_URL", "https://meridiano.163-176-9-70.sslip.io").rstrip("/")   # endereço público da loja (webhook e retorno do pagamento)
 MAX_OPEN_ORDERS = int(env("MAX_OPEN_ORDERS", "50"))   # pedidos abertos em 10 min antes de recusar novos (evita encher o banco)
+DOWNLOAD_DAYS = int(env("DOWNLOAD_DAYS", "7"))
+DOWNLOAD_MAX = int(env("DOWNLOAD_MAX", "5"))

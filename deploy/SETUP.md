@@ -58,3 +58,12 @@ printf '%s\n' '{"seller_name": "Nome Completo", "contact_email": "contato@exempl
 - Tokens de teste (`TEST-...`) usam o sandbox e **nunca** entram no caixa.
 - Reembolso e chargeback viram lançamentos de despesa no caixa (reembolsos parciais, pela diferença). A taxa do Mercado Pago é lançada como despesa quando a API a informa.
 - Nenhum dado pessoal do comprador é guardado: só o id do pagamento e os valores.
+
+## Quando a compra abre (e o que mostra o painel)
+O painel mostra uma linha **"Loja: aberta/fechada (motivo)"** e, por produto, por que a compra está fechada. A compra de um produto só abre quando **tudo** isto é verdade; senão a página mostra "Pagamento em breve" e ninguém é cobrado:
+1. produto **pronto** (todas as seções escritas) e com **texto de venda** e **preço**;
+2. **token do Mercado Pago verificado** (a verificação vale só para o token que está no arquivo agora);
+3. **vendedor identificado** (nome e e-mail);
+4. **revisão aprovada pela Presidente** *desta versão* da página: se o texto ou o preço mudar depois, a aprovação cai e é preciso revisar de novo (quem escreveu o texto nunca o revisa; se foi a Presidente, o CEO revisa).
+
+**Entrega:** a compra confirmada gera um link único, válido por 7 dias e com 5 downloads (PDF e Markdown). Os botões são formulários (POST), então pré-visualizadores de links não gastam downloads. Reembolso total ou chargeback revogam o link na hora. O PDF leva o número do pedido no rodapé. Variáveis: `DOWNLOAD_DAYS`, `DOWNLOAD_MAX`.
