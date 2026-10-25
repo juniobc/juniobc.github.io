@@ -24,7 +24,7 @@ def build_prompt(conn, me):
             "Decida o próximo passo útil e execute com as tools. Se não há nada a fazer, crie tarefas para a equipe ou pesquise uma oportunidade.")
 
 
-def run_turn(conn, me, chat=llm.chat):
+def run_turn(conn, me, chat=llm.chat_fallback):
     conn.execute("UPDATE employees SET status='working', activity=%s WHERE id=%s", ("Pensando no próximo passo", me["id"]))
     messages = [{"role": "system", "content": RULES}, {"role": "user", "content": build_prompt(conn, me)}]
     try:
@@ -42,5 +42,7 @@ def run_turn(conn, me, chat=llm.chat):
                 log.info("%s %s -> %s", me["slug"], fn["name"], out[:120])
                 conn.execute("UPDATE employees SET activity=%s WHERE id=%s", (f"Usando {fn['name']}", me["id"]))
                 messages.append({"role": "tool", "tool_call_id": c["id"], "content": out[:3000]})
+    except llm.EmptyResponse:
+        raise
     finally:
         conn.execute("UPDATE employees SET status='idle', activity='' WHERE id=%s", (me["id"],))

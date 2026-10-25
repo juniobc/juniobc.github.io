@@ -5,10 +5,11 @@ import { api, getToken, setToken } from './api.js';
 const brl = (n) => 'R$ ' + Number(n).toFixed(2).replace('.', ',');
 const TABS = ['Escritório', 'Tarefas', 'Produtos', 'Caixa'];
 
-function Login({ onDone }) {
+function Login({ onDone, error }) {
   const [v, setV] = useState('');
   return (
     <div className="wrap"><h1>Meridiano Digital</h1>
+      {error && <p className="note" style={{ color: '#ff8a80' }}>{error}</p>}
       <p className="note">Cole o token de acesso para ver a empresa.</p>
       <input value={v} onChange={(e) => setV(e.target.value)} placeholder="token" type="password" />{' '}
       <button onClick={() => { setToken(v.trim()); onDone(); }}>Entrar</button></div>
@@ -19,6 +20,7 @@ export default function App() {
   const [auth, setAuth] = useState(!!getToken());
   const [d, setD] = useState({ state: null, emps: [], msgs: [], tasks: [], prods: [], ledger: [] });
   const [err, setErr] = useState('');
+  const [loginErr, setLoginErr] = useState('');
   const [tab, setTab] = useState(0);
   const [sel, setSel] = useState(null);
 
@@ -31,14 +33,14 @@ export default function App() {
           ['state', 'employees', 'messages?limit=40', 'tasks', 'products', 'ledger'].map(api));
         if (on) { setD({ state, emps, msgs, tasks, prods, ledger }); setErr(''); }
       } catch (e) {
-        if (e.message === '401') { setToken(''); setAuth(false); } else setErr('Sem conexão com o servidor.');
+        if (e.message === '401') { setToken(''); setLoginErr('Token inválido. Confira e tente de novo.'); setAuth(false); } else setErr('Sem conexão com o servidor.');
       }
     };
     load(); const id = setInterval(load, 5000);
     return () => { on = false; clearInterval(id); };
   }, [auth]);
 
-  if (!auth) return <Login onDone={() => setAuth(true)} />;
+  if (!auth) return <Login error={loginErr} onDone={() => { setLoginErr(''); setAuth(true); }} />;
   const s = d.state, speech = {};
   d.msgs.slice().reverse().forEach((m) => { if (m.from_slug) speech[m.from_slug] = m.body; });
   const who = d.emps.find((e) => e.slug === sel);
@@ -65,6 +67,7 @@ export default function App() {
           <li key={m.id}><b>{m.from_name || 'Sistema'}</b>{m.to_name ? ` → ${m.to_name}` : ' (mural)'}<br />{m.body}<br />
             <small>{new Date(m.created_at).toLocaleString('pt-BR')}</small></li>))}
           {!d.msgs.length && <li className="note">Ainda sem conversas. O motor roda um funcionário por vez.</li>}</ul>
+        {s && s.falhas_hoje > 0 && <p className="note" style={{ color: '#ffcc80' }}>Falhas hoje: {s.falhas_hoje}. Último erro: {s.ultimo_erro}</p>}
         {s && <p className="note">Uso hoje: {s.uso_hoje.chamadas}/{s.uso_hoje.limite_chamadas} chamadas, {s.uso_hoje.tokens}/{s.uso_hoje.limite_tokens} tokens.</p>}
       </>}
 

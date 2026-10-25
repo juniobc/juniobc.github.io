@@ -106,3 +106,18 @@ def test_deploy_log_route(conn, tmp_path, monkeypatch):
     assert c.get("/api/deploy-log").status_code == 401
     r = c.get("/api/deploy-log", headers={"X-Token": "leitura"}).json()
     assert len(r["linhas"]) == 50 and r["linhas"][-1] == "linha 79"
+
+
+def test_empty_response_is_error_and_does_not_use_budget(conn, monkeypatch):
+    from meridiano.engine import llm
+    monkeypatch.setenv("NOUS_API_KEY", "x")
+
+    class R:
+        def raise_for_status(self): pass
+        def json(self): return {"choices": [{"message": {"role": "assistant", "content": None, "reasoning": "..."}}], "usage": {"prompt_tokens": 100, "completion_tokens": 3500}}
+    monkeypatch.setattr(llm.httpx, "post", lambda *a, **k: R())
+    with pytest.raises(llm.EmptyResponse):
+        llm.chat(conn, None, "poolside/laguna-s-2.1:free", [])
+    assert llm.usage_today(conn) == (0, 0)
+    n, err = llm.failures_today(conn)
+    assert n == 1 and "vazia" in err

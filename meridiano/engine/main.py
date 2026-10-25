@@ -19,6 +19,7 @@ def main():
     conn = db.connect()
     db.init_schema(conn)
     seed.seed(conn)
+    conn.execute("UPDATE employees SET model=%s WHERE model = ANY(%s)", (config.DEFAULT_ROTATION[0], list(config.AVOID)))
     last = 0
     while True:
         me = pick(conn, last)
