@@ -1,7 +1,7 @@
 """Loop do motor: um funcionário por turno, em rodízio, em cadência constante."""
 import logging
 import time
-from . import config, db, llm, agent, seed, pacing
+from . import config, db, llm, agent, seed, pacing, plan
 
 log = logging.getLogger("meridiano")
 
@@ -19,6 +19,8 @@ def main():
     conn = db.connect()
     db.init_schema(conn)
     seed.seed(conn)
+    seed.refresh_instructions(conn)
+    plan.ensure(conn)
     conn.execute("UPDATE employees SET model=%s WHERE model = ANY(%s)", (config.DEFAULT_ROTATION[0], list(config.AVOID)))
     log.info("limites efetivos: %s chamadas, %s tokens por dia", config.DAILY_CALL_LIMIT, config.DAILY_TOKEN_LIMIT)
     last = 0

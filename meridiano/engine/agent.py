@@ -12,18 +12,49 @@ Regras inegociáveis:
 - Antes de criar tarefa ou produto, veja list_products/list_team. Não duplique: se já existe, continue o que existe.
 - Só o dono (Junio) abre conta de vendedor, usa CPF e saca dinheiro. Hotmart, Kiwify e Mercado Livre aceitam CPF de pessoa física: NÃO exija CNPJ. Para pedir algo a ele use ask_owner, em UMA linha com exatamente o que ele precisa fazer.
 - Nunca fique esperando: se não há tarefa nem mensagem nova, CRIE e execute agora o próximo passo concreto do seu trabalho (escrever o próximo capítulo de um produto com write_product mode=append, revisar um texto, preparar descrição e página de venda para marketplace, pesquisar concorrentes e preços). Pedidos ao Junio só por ask_owner, e eles não bloqueiam o resto: siga trabalhando no que não depende dele.
+- Conteúdo financeiro é EDUCATIVO: não prometa retorno, não faça recomendação individual de investimento e não invente dados, números de mercado ou depoimentos. Conteúdo de vendas deve ser honesto, sem promessa de ganho garantido.
 - Contrate só quando faltar uma função, com motivo claro. Cada pessoa nova divide o orçamento de tokens do dia com todos: demita (fire_employee, com motivo) quem não for mais necessário."""
+
+def production_block(conn, me):
+    """Prioridade do turno: o estado real de cada produto do plano e a próxima seção a escrever."""
+    prods = conn.execute("SELECT p.id,p.name,p.status FROM products p WHERE EXISTS (SELECT 1 FROM product_sections s WHERE s.product_id=p.id) ORDER BY p.id").fetchall()
+    if not prods:
+        return ""
+    lines, target = [], None
+    for p in prods:
+        secs = conn.execute("SELECT position,title,content,needs_rewrite,rewrite_reason FROM product_sections WHERE product_id=%s ORDER BY position", (p["id"],)).fetchall()
+        done = sum(1 for s in secs if s["content"] and not s["needs_rewrite"])
+        lines.append(f"- {p['name']}: {done} de {len(secs)} seções ({p['status']})")
+        if target is None:
+            nxt = next((s for s in secs if s["needs_rewrite"]), None) or next((s for s in secs if not s["content"]), None)
+            if nxt:
+                target = (p["name"], nxt)
+    if not target:
+        return "PRODUÇÃO: todos os produtos estão prontos. O dono foi avisado; revise textos fracos com request_rewrite ou proponha um novo produto com ask_owner.\n" + "\n".join(lines)
+    name, s = target
+    todo = f"Escreva AGORA a seção {s['position']} ('{s['title']}') de '{name}' com write_section: seção COMPLETA, no mínimo {config.MIN_SECTION_WORDS} palavras, em português, útil e original, sem pedir nada a ninguém."
+    if s["needs_rewrite"]:
+        todo += f" É uma REESCRITA: o revisor disse: {s['rewrite_reason']}"
+    if tools.re.search(r"presidente", me["role"], tools.re.I):
+        done_secs = conn.execute("SELECT p.name,s.position FROM product_sections s JOIN products p ON p.id=s.product_id WHERE s.content<>'' AND NOT s.needs_rewrite ORDER BY s.written_at DESC NULLS LAST LIMIT 1").fetchone()
+        review = (f"Você é o REVISOR: leia a seção mais recente com read_product ('{done_secs['name']}', section_number={done_secs['position']}). "
+                  "Se estiver fraca (curta, genérica, repetitiva ou com dados inventados), chame request_rewrite com o motivo. Se estiver boa, escreva a próxima seção. "
+                  "Não converse sobre arquivos nem sobre planejamento.\n") if done_secs else ""
+        todo = review + todo
+    return "PRODUÇÃO (prioridade máxima, o plano já está definido, não replaneje):\n" + "\n".join(lines) + "\n" + todo
+
 
 def build_prompt(conn, me):
     tasks = conn.execute("SELECT id,title,details FROM tasks WHERE assignee_id=%s AND status='open' ORDER BY id LIMIT 3", (me["id"],)).fetchall()
-    inbox = conn.execute("SELECT body FROM messages WHERE to_id=%s OR to_id IS NULL ORDER BY id DESC LIMIT 3", (me["id"],)).fetchall()
+    inbox = conn.execute("SELECT body FROM messages WHERE (to_id=%s OR to_id IS NULL) AND NOT archived ORDER BY id DESC LIMIT 3", (me["id"],)).fetchall()
     team = conn.execute("SELECT slug,role FROM employees WHERE active ORDER BY id").fetchall()
     t = "\n".join(f"[{x['id']}] {x['title']}: {x['details'][:300]}" for x in tasks) or "(nenhuma tarefa aberta)"
     m = "\n".join("- " + x["body"][:250] for x in inbox) or "(sem mensagens)"
     tm = ", ".join(f"{x['slug']} ({x['role']})" for x in team)
+    prod = production_block(conn, me)
     return (f"Seu slug: {me['slug']}. Nome: {me['name']}. Cargo: {me['role']} ({me['area']}).\n"
-            f"Instruções: {me['instructions'][:800]}\n\nEquipe: {tm}\n\nSuas tarefas:\n{t}\n\nMensagens recentes:\n{m}\n\n"
-            "Execute agora o próximo passo útil com as tools (se não há tarefa, escolha você mesmo o passo concreto). Se concluiu uma tarefa, chame complete_task.")
+            f"Instruções: {me['instructions'][:800]}\n\n{prod}\n\nEquipe: {tm}\n\nSuas tarefas:\n{t}\n\nMensagens recentes:\n{m}\n\n"
+            "Execute agora com as tools. Se concluiu uma tarefa, chame complete_task.")
 
 
 def run_turn(conn, me, chat=llm.chat_fallback):

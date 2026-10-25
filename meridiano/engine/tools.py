@@ -19,8 +19,12 @@ SPECS = [
      "parameters": {"type": "object", "properties": {"task_id": {"type": "integer"}, "result": {"type": "string"}}, "required": ["task_id", "result"]}},
     {"name": "write_product", "description": "Escreve (ou continua) o CONTEÚDO de um produto digital. Não existem arquivos prontos: você mesmo escreve o texto. Se o produto já existe, atualiza em vez de criar outro. Para textos longos use mode=append em várias chamadas.",
      "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "content": {"type": "string"}, "mode": {"type": "string", "enum": ["replace", "append"]}, "description": {"type": "string"}, "price_brl": {"type": "number"}, "status": {"type": "string", "enum": ["rascunho", "revisao", "pronto"]}}, "required": ["product_name", "content"]}},
-    {"name": "read_product", "description": "Lê o conteúdo já escrito de um produto.",
-     "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}}, "required": ["product_name"]}},
+    {"name": "read_product", "description": "Lê o conteúdo já escrito de um produto (ou só uma seção, com section_number).",
+     "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "section_number": {"type": "integer"}}, "required": ["product_name"]}},
+    {"name": "write_section", "description": "Escreve UMA seção COMPLETA de um produto do plano (mínimo 400 palavras, em português, conteúdo útil e original). Substitui o texto da seção. Quando todas as seções existem, o produto vira 'pronto'.",
+     "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "section_number": {"type": "integer"}, "content": {"type": "string"}}, "required": ["product_name", "section_number", "content"]}},
+    {"name": "request_rewrite", "description": "Revisor: marca uma seção escrita como fraca e pede reescrita, com o motivo.",
+     "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "section_number": {"type": "integer"}, "reason": {"type": "string"}}, "required": ["product_name", "section_number", "reason"]}},
     {"name": "list_products", "description": "Lista produtos com status, preço e tamanho do conteúdo.", "parameters": {"type": "object", "properties": {}}},
     {"name": "ask_owner", "description": "Registra UM pedido objetivo ao dono (Junio) para algo que só ele pode fazer (conta de vendedor, CPF, aprovação). Uma linha.",
      "parameters": {"type": "object", "properties": {"body": {"type": "string"}}, "required": ["body"]}},
@@ -78,6 +82,38 @@ def web_search(query):
     return "\n".join(out) or "sem resultados"
 
 
+def _find_section(conn, product_name, number):
+    """(produto, seção) ou (mensagem de erro, None)."""
+    prod = next((p for p in conn.execute("SELECT id,name FROM products").fetchall() if similar(p["name"], product_name)), None)
+    if not prod:
+        return "erro: produto não existe (use list_products)", None
+    sec = conn.execute("SELECT * FROM product_sections WHERE product_id=%s AND position=%s", (prod["id"], int(number))).fetchone()
+    if not sec:
+        return "erro: este produto não tem essa seção no plano", None
+    return prod, sec
+
+
+def _after_section_saved(conn, prod, me, sec, words):
+    """Remonta o texto do produto, atualiza o status e avisa o dono uma única vez quando tudo está escrito."""
+    secs = conn.execute("SELECT position,title,content,needs_rewrite FROM product_sections WHERE product_id=%s ORDER BY position", (prod["id"],)).fetchall()
+    text = "\n\n".join(f"## {s['position']}. {s['title']}\n\n{s['content']}" for s in secs if s["content"])
+    done = [s for s in secs if s["content"] and not s["needs_rewrite"]]
+    ready = len(done) == len(secs)
+    conn.execute("UPDATE products SET content=%s, status=%s, updated_at=now() WHERE id=%s",
+                 (text, "pronto" if ready else "rascunho", prod["id"]))
+    msg = f"seção {sec['position']} salva ({words} palavras). Produto: {len(done)} de {len(secs)} seções prontas."
+    if ready:
+        body = f"Produto {prod['name']} pronto, preciso que o Junio publique no marketplace"
+        if not conn.execute("SELECT 1 FROM owner_requests WHERE body=%s", (body,)).fetchone():
+            conn.execute("INSERT INTO owner_requests(from_id,body) VALUES (%s,%s)", (me["id"], body))
+        msg += " Todas as seções existem: produto marcado como pronto e pedido registrado ao dono."
+    else:
+        nxt = next((s for s in secs if not s["content"] or s["needs_rewrite"]), None)
+        if nxt:
+            msg += f" Próxima: seção {nxt['position']} ({nxt['title']})."
+    return msg
+
+
 def run_tool(conn, me, name, args):
     """Executa uma tool para o funcionário `me` (dict). Devolve texto (limitado)."""
     out = cap(_run_tool(conn, me, name, args))
@@ -98,6 +134,10 @@ def _record_activity(conn, me, name, args, out):
         return
     if name == "web_search":
         activity(conn, me["id"], "pesquisando", f"Pesquisa: {str(args.get('query', ''))[:80]}")
+    elif name == "write_section":
+        activity(conn, me["id"], "escrevendo_produto", f"Escreve {str(args.get('product_name', ''))[:60]}, seção {args.get('section_number')}")
+    elif name == "request_rewrite":
+        activity(conn, me["id"], "planejando", f"Pediu reescrita da seção {args.get('section_number')}")
     elif name in ("write_product", "read_product"):
         activity(conn, me["id"], "escrevendo_produto", f"{'Escreve' if name == 'write_product' else 'Lê'} {str(args.get('product_name', ''))[:80]}")
     elif name == "post_message":
@@ -149,6 +189,8 @@ def _run_tool(conn, me, name, args):
                 if similar(p["name"], pname):
                     row = p
                     break
+            if row and conn.execute("SELECT 1 FROM product_sections WHERE product_id=%s LIMIT 1", (row["id"],)).fetchone():
+                return "erro: este produto tem plano de seções; use write_section (uma seção completa por vez)"
             if row:
                 new_content = (row["content"] + "\n\n" + content) if mode == "append" and row["content"] else content
                 new_content = new_content[:60000]
@@ -171,8 +213,13 @@ def _run_tool(conn, me, name, args):
                 pass
             return f"produto '{shown}' ({'atualizado' if row else 'criado'}): {total} caracteres guardados"
         if name == "read_product":
-            for p in conn.execute("SELECT name,content,status FROM products").fetchall():
+            for p in conn.execute("SELECT id,name,content,status FROM products").fetchall():
                 if similar(p["name"], args["product_name"]):
+                    if args.get("section_number"):
+                        sec = conn.execute("SELECT title,content,needs_rewrite FROM product_sections WHERE product_id=%s AND position=%s", (p["id"], int(args["section_number"]))).fetchone()
+                        if not sec:
+                            return "erro: seção não existe"
+                        return f"Seção {args['section_number']}: {sec['title']} ({len(sec['content'].split())} palavras{', reescrita pedida' if sec['needs_rewrite'] else ''})\n" + cap(sec["content"] or "(ainda sem texto)", 3000)
                     return f"[{p['status']}] {p['name']} ({len(p['content'])} caracteres)\n" + cap(p["content"], 3000)
             return "erro: produto não existe (use list_products)"
         if name == "list_products":
@@ -185,6 +232,29 @@ def _run_tool(conn, me, name, args):
                     return f"já existe o pedido {r['id']} ao dono; não repita."
             conn.execute("INSERT INTO owner_requests(from_id,body) VALUES (%s,%s)", (me["id"], body))
             return "pedido registrado para o dono"
+        if name == "write_section":
+            prod, sec = _find_section(conn, args["product_name"], args["section_number"])
+            if not sec:
+                return prod or "erro: seção não existe"
+            content = str(args["content"]).strip()[:40000]
+            words = len(content.split())
+            if words < config.MIN_SECTION_WORDS:
+                return f"erro: a seção tem {words} palavras; o mínimo é {config.MIN_SECTION_WORDS}. Escreva a seção COMPLETA, mais longa e detalhada, e envie de novo."
+            conn.execute("UPDATE product_sections SET content=%s, needs_rewrite=false, rewrite_reason='', written_by=%s, written_at=now() WHERE id=%s",
+                         (content, me["id"], sec["id"]))
+            return _after_section_saved(conn, prod, me, sec, words)
+        if name == "request_rewrite":
+            prod, sec = _find_section(conn, args["product_name"], args["section_number"])
+            if not sec:
+                return prod or "erro: seção não existe"
+            if not sec["content"]:
+                return "erro: a seção ainda não foi escrita"
+            reason = str(args["reason"]).strip()[:400]
+            if len(reason) < 5:
+                return "erro: informe o motivo"
+            conn.execute("UPDATE product_sections SET needs_rewrite=true, rewrite_reason=%s WHERE id=%s", (reason, sec["id"]))
+            conn.execute("UPDATE products SET status='rascunho', updated_at=now() WHERE id=%s", (prod["id"],))
+            return f"reescrita pedida para a seção {sec['position']}"
         if name == "post_message":
             to_slug = (args.get("to") or "").strip()
             to_id = None

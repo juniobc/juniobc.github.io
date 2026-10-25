@@ -136,7 +136,7 @@ def test_migrations_idempotent_and_clean_old_empty_usage(url, monkeypatch):
     c.execute("INSERT INTO employees(slug,name,role,area,instructions,model) VALUES ('a','A','CEO','D','x','m'),('b','B','CEO','D','x','m')")
     c.execute("INSERT INTO usage_log(employee_id,model,prompt_tokens,completion_tokens) SELECT id,'m',100,3500 FROM employees, generate_series(1,2)")
     c.execute("INSERT INTO messages(from_id,body) SELECT id,'oi' FROM employees WHERE slug='b'")
-    assert migrate.migrate(c) == ["002_zera_uso_vazio.sql", "003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql"]
+    assert migrate.migrate(c) == ["002_zera_uso_vazio.sql", "003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql"]
     assert migrate.migrate(c) == []
     ok = c.execute("SELECT e.slug FROM usage_log u JOIN employees e ON e.id=u.employee_id WHERE u.ok GROUP BY 1").fetchall()
     assert [r["slug"] for r in ok] == ["b"]  # b tem mensagem gravada: chamadas dele eram úteis
@@ -210,7 +210,7 @@ def test_migration_003_cleans_duplicates(url, monkeypatch):
         c.execute("INSERT INTO products(name,file_path) VALUES ('Toolkit X','a.txt')")
         c.execute("INSERT INTO tasks(title) VALUES ('Pesquisar copy')")
     c.execute("INSERT INTO tasks(title,details) VALUES ('Receber fontes','mandar os arquivos .txt fonte')")
-    assert migrate.migrate(c) == ["003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql"]
+    assert migrate.migrate(c) == ["003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql"]
     assert c.execute("SELECT COUNT(*) AS n FROM products").fetchone()["n"] == 1
     assert c.execute("SELECT COUNT(*) AS n FROM tasks WHERE status='open'").fetchone()["n"] == 1
 
@@ -339,3 +339,76 @@ def test_api_engine_status(conn, monkeypatch):
     assert r["motivo_espera"] == "limite" and r["ultimo_turno_por"] == "Rafael" and r["funcionario_da_vez"] is None
     conn.execute("UPDATE engine_status SET heartbeat_at = now() - interval '2 hours'")
     assert c.get("/api/engine", headers=h).json()["vivo"] is False           # sem batimento: processo morto
+
+
+WORDS = lambda n: " ".join(["palavra"] * n)
+
+
+def test_plan_sections_review_and_ready_flow(conn, tmp_path, monkeypatch):
+    from meridiano.engine import agent, plan, tools, config
+    monkeypatch.setattr(config, "PRODUCTS_DIR", str(tmp_path))
+    ceo = _ceo(conn)
+    pres = conn.execute("SELECT * FROM employees WHERE slug='presidente'").fetchone()
+    conn.execute("INSERT INTO products(name,file_path) VALUES ('Copy de Vendas','copy.txt')")   # produto antigo, sem conteúdo
+    plan.ensure(conn); plan.ensure(conn)                                                        # idempotente
+    assert conn.execute("SELECT COUNT(*) AS n FROM products").fetchone()["n"] == 3              # reaproveitou o existente
+    assert conn.execute("SELECT COUNT(*) AS n FROM product_sections").fetchone()["n"] == 28
+    # produto com plano recusa write_product
+    assert tools.run_tool(conn, ceo, "write_product", {"product_name": "Copy de Vendas", "content": "x"}).startswith("erro")
+    # seção curta é recusada; completa é aceita
+    assert "mínimo" in tools.run_tool(conn, ceo, "write_section", {"product_name": "Copy de Vendas", "section_number": 1, "content": WORDS(50)})
+    out = tools.run_tool(conn, ceo, "write_section", {"product_name": "Copy de Vendas", "section_number": 1, "content": WORDS(450)})
+    assert "1 de 8" in out and "Próxima: seção 2" in out
+    assert tools.run_tool(conn, ceo, "write_section", {"product_name": "Copy de Vendas", "section_number": 99, "content": WORDS(450)}).startswith("erro")
+    prompt = agent.build_prompt(conn, ceo)
+    assert "PRODUÇÃO" in prompt and "seção 2" in prompt
+    # revisor (Presidente) vê instrução de revisão e pede reescrita
+    pprompt = agent.build_prompt(conn, pres)
+    assert "REVISOR" in pprompt and "section_number=1" in pprompt
+    assert "reescrita pedida" in tools.run_tool(conn, pres, "request_rewrite", {"product_name": "Copy de Vendas", "section_number": 1, "reason": "genérica demais"})
+    assert "REESCRITA" in agent.build_prompt(conn, ceo) and "genérica demais" in agent.build_prompt(conn, ceo)
+    # termina todas as seções: vira 'pronto' e pede ao dono uma única vez
+    for n in range(1, 9):
+        tools.run_tool(conn, ceo, "write_section", {"product_name": "Copy de Vendas", "section_number": n, "content": WORDS(420)})
+    p = conn.execute("SELECT * FROM products WHERE name='Copy de Vendas'").fetchone()
+    assert p["status"] == "pronto" and "## 8." in p["content"]
+    tools.run_tool(conn, ceo, "write_section", {"product_name": "Copy de Vendas", "section_number": 3, "content": WORDS(430)})   # reescrever depois de pronto
+    reqs = conn.execute("SELECT body FROM owner_requests").fetchall()
+    assert [r["body"] for r in reqs] == ["Produto Copy de Vendas pronto, preciso que o Junio publique no marketplace"]
+
+
+def test_archived_messages_stay_out_of_context(conn):
+    from meridiano.engine import agent
+    ceo = _ceo(conn)
+    conn.execute("INSERT INTO messages(from_id,body,archived) VALUES (%s,'Confirme onde estão os arquivos fonte .txt',true)", (ceo["id"],))
+    conn.execute("INSERT INTO messages(from_id,body) VALUES (%s,'mensagem nova')", (ceo["id"],))
+    p = agent.build_prompt(conn, ceo)
+    assert "mensagem nova" in p and ".txt" not in p
+
+
+def test_migration_006_archives_existing_messages(url, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", url)
+    from meridiano.engine import db, migrate
+    c = db.connect()
+    c.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+    files = sorted(migrate.DIR.glob("*.sql"))
+    c.execute("CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())")
+    for f in files[:5]:
+        c.execute(f.read_text()); c.execute("INSERT INTO schema_migrations(name) VALUES (%s)", (f.name,))
+    c.execute("INSERT INTO messages(body) VALUES ('velha 1'),('velha 2')")
+    assert migrate.migrate(c) == ["006_secoes_arquivo.sql"]
+    c.execute("INSERT INTO messages(body) VALUES ('nova')")
+    assert [r["body"] for r in c.execute("SELECT body FROM messages WHERE NOT archived").fetchall()] == ["nova"]
+
+
+def test_api_products_show_sections_progress(conn, monkeypatch):
+    monkeypatch.setenv("MERIDIANO_API_TOKEN", "t")
+    from meridiano.engine import plan, tools
+    from meridiano.api import main
+    ceo = _ceo(conn)
+    plan.ensure(conn)
+    tools.run_tool(conn, ceo, "write_section", {"product_name": "Copy de Vendas", "section_number": 1, "content": WORDS(450)})
+    main._conn = conn
+    ps = {p["name"]: p for p in TestClient(main.app).get("/api/products", headers={"X-Token": "t"}).json()}
+    cv = ps["Copy de Vendas"]
+    assert (cv["secoes_prontas"], cv["secoes_total"]) == (1, 8) and cv["caracteres"] > 2000
