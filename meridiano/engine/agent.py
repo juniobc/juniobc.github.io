@@ -1,11 +1,12 @@
 import logging
-from . import config, llm, tools
+from . import config, llm, owner_chat, tools
 
 log = logging.getLogger("meridiano")
 
 RULES = """Você é um funcionário da Meridiano Digital, empresa de agentes de IA que começou com R$ 0.
 MISSÃO: encontrar meios legítimos de gerar dinheiro real, quaisquer que sejam, e testá-los rápido. Você pode escolher e mudar de estratégia com liberdade, desde que seja legal, honesta, sem spam nem mensagem em massa a estranhos (LGPD), sem golpe, sem falsa promessa de ganho, sem criar contas nem assumir identidade de terceiros, sem dado pessoal e sem mexer fora do projeto. Exemplos só como inspiração (não é lista fechada): produtos digitais; serviços sob encomenda entregues por checkout próprio (textos, planilhas personalizadas, análise de currículo, roteiros, traduções, resumos, relatórios de pesquisa); conteúdo com SEO e afiliados (só quando o dono liberar contas); micro-ferramentas e calculadoras úteis na web; newsletters e assinaturas; dados públicos organizados (sem dado pessoal); automações para pequenos negócios; qualquer ideia nova que você descobrir pesquisando. O que exigir identidade, conta bancária ou aceite de termos é pedido único ao dono via ask_owner.
 Regras inegociáveis:
+- O dono (Junio) pode escrever a você no chat: as mensagens dele aparecem no topo do seu contexto e têm prioridade; responda com reply_owner e aja.
 - Você NÃO movimenta dinheiro e NÃO registra vendas. Receita só existe quando o dono registra um pagamento real. Nunca afirme que vendeu algo.
 - Nada de spam nem mensagens em massa para estranhos (LGPD). Clientes chegam por conteúdo útil e busca (SEO), à loja do próprio servidor.
 - Você só fala com colegas internos, usando as tools. Seja objetivo e aja com as tools.
@@ -103,7 +104,7 @@ def team_block(conn, me):
     return "\n".join(lines)
 
 
-def build_prompt(conn, me):
+def build_prompt(conn, me, pending=()):
     tasks = conn.execute("SELECT id,title,details FROM tasks WHERE assignee_id=%s AND status='open' ORDER BY id LIMIT 3", (me["id"],)).fetchall()
     inbox = conn.execute("SELECT body FROM messages WHERE (to_id=%s OR to_id IS NULL) AND NOT archived ORDER BY id DESC LIMIT 3", (me["id"],)).fetchall()
     team = conn.execute("SELECT slug,role FROM employees WHERE active ORDER BY id").fetchall()
@@ -114,14 +115,15 @@ def build_prompt(conn, me):
     eq = team_block(conn, me)
     if eq:
         prod += "\n\n" + eq
-    return (f"Seu slug: {me['slug']}. Nome: {me['name']}. Cargo: {me['role']} ({me['area']}).\n"
+    return (owner_chat.prompt_block(pending) + f"Seu slug: {me['slug']}. Nome: {me['name']}. Cargo: {me['role']} ({me['area']}).\n"
             f"Instruções: {me['instructions'][:800]}\n\n{prod}\n\nEquipe: {tm}\n\nSuas tarefas:\n{t}\n\nMensagens recentes:\n{m}\n\n"
             "Execute agora com as tools. Se concluiu uma tarefa, chame complete_task.")
 
 
 def run_turn(conn, me, chat=llm.chat_fallback):
     conn.execute("UPDATE employees SET status='working', activity=%s WHERE id=%s", ("Pensando no próximo passo", me["id"]))
-    messages = [{"role": "system", "content": RULES}, {"role": "user", "content": build_prompt(conn, me)}]
+    pending = owner_chat.pending(conn, me["id"])   # mensagens do dono: prioridade máxima no contexto
+    messages = [{"role": "system", "content": RULES}, {"role": "user", "content": build_prompt(conn, me, pending)}]
     try:
         for _ in range(config.MAX_TOOL_ROUNDS):
             msg = chat(conn, me["id"], me["model"], messages, tools.TOOL_DEFS)
@@ -141,6 +143,7 @@ def run_turn(conn, me, chat=llm.chat_fallback):
                 log.info("%s %s -> %s", me["slug"], fn["name"], out[:120])
                 conn.execute("UPDATE employees SET activity=%s WHERE id=%s", (f"Usando {fn['name']}", me["id"]))
                 messages.append({"role": "tool", "tool_call_id": c["id"], "content": out})
+        owner_chat.mark_read(conn, me["id"], [m["id"] for m in pending])   # só marca como recebida se o turno terminou sem erro
     finally:
         conn.execute("UPDATE employees SET status='idle', activity='', last_turn_at=now() WHERE id=%s", (me["id"],))
         tools.activity(conn, me["id"], "parado", "")

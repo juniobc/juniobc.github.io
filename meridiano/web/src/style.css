@@ -9,4 +9,4 @@ canvas{width:100%;image-rendering:pixelated;background:#142522;border-radius:8px
 .feed{list-style:none;padding:0;margin:0}.feed li{padding:8px 0;border-bottom:1px solid #ffffff14}
 .feed small{color:var(--mute)}.note{color:var(--mute);font-size:12px}
 input,button{font:inherit;padding:10px;border-radius:8px;border:0}button{background:var(--acc);color:#052}
-nav{display:flex;gap:4px;margin:12px 0}nav button{flex:1;padding:10px 2px;font-size:13px;background:var(--card);color:var(--ink)}nav button.on{background:var(--acc);color:#052}
+nav{display:flex;gap:4px;margin:12px 0;overflow-x:auto}nav button{flex:0 0 auto;padding:10px 12px;font-size:13px;background:var(--card);color:var(--ink)}nav button.on{background:var(--acc);color:#052}

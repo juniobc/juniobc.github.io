@@ -91,3 +91,7 @@ O dono entra no painel com **Entrar com Google** (OpenID Connect, code flow com 
 **Recuperação:** se existir `MERIDIANO_ADMIN_TOKEN` no `meridiano.env`, ele continua valendo no lugar da sessão (cabeçalho `X-Admin-Token`; 5 erros bloqueiam por 15 min). Fica oculto na aba Configurações > Segurança.
 
 **Chaves pelo painel:** cartões Mercado Pago e chaves de LLM (Nous, OpenRouter, Anthropic, OpenAI e "outro compatível") com Salvar, Testar e Remover. Os valores nunca voltam do servidor, nem vão para log, banco ou erro. Os caminhos por arquivo (`mp-token`, `store.json`, `llm-<nome>`) continuam valendo como alternativa.
+
+## Conversa com a empresa (texto e voz)
+Aba **Conversa**: o dono escreve para o Presidente, o CEO, qualquer funcionário ou "todos". A mensagem entra no topo do contexto do destinatário (prioridade máxima) e dispara um turno imediato dele, sem esperar o rodízio (limite `OWNER_TURNS_PER_DAY`, padrão 30; mensagens por dia: `OWNER_MSGS_PER_DAY`, padrão 200). Em "todos", Presidente e CEO respondem na hora e os demais recebem no turno normal. As respostas vêm da tool `reply_owner`. Enviar exige o token de leitura (ou a sessão do Google); não há ação de administrador nesta aba.
+A voz roda só no navegador do celular (Chrome no Android): botão de microfone com `SpeechRecognition` (pt-BR) e interruptor "ler respostas em voz alta" com `speechSynthesis`. Nenhum áudio é gravado nem enviado ao servidor; sem suporte, o aviso aparece e o texto continua funcionando.
