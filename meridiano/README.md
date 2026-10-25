@@ -9,15 +9,8 @@ Empresa de agentes de IA. Python (motor + API FastAPI), PostgreSQL, React (telas
 - Sem tool de e-mail/WhatsApp/envio externo: nada de spam (LGPD).
 - Segredos só em `~/meridiano/meridiano.env` (600).
 
-## Instalar (usuário `empresa`, sem sudo)
-```
-git clone -b claude/play-game-czq8sk https://github.com/juniobc/juniobc.github.io ~/repo
-REPO_DIR=~/repo bash ~/repo/meridiano/install.sh
-# editar ~/meridiano/meridiano.env e preencher NOUS_API_KEY
-nohup ~/meridiano/run.sh api    > ~/meridiano/api.log 2>&1 &
-nohup ~/meridiano/run.sh engine > ~/meridiano/engine.log 2>&1 &
-```
-O app escuta em `127.0.0.1:8080`. Caddy (Spark) expõe com HTTPS. Telas e API na mesma origem.
+## Instalar e atualizar
+Veja `deploy/SETUP.md`. Deploy automático da branch `main` a cada minuto, com migrações (`sql/migrations`), supervisor e rollback. O app escuta em `127.0.0.1:8100`.
 
 ## Registrar uma venda real (só o Junio)
 `curl -X POST .../api/ledger -H "X-Admin-Token: ..." -H 'Content-Type: application/json' -d '{"kind":"receita","amount_cents":4990,"description":"Venda Hotmart #123","external_ref":"HP123"}'`

@@ -121,3 +121,23 @@ def test_empty_response_is_error_and_does_not_use_budget(conn, monkeypatch):
     assert llm.usage_today(conn) == (0, 0)
     n, err = llm.failures_today(conn)
     assert n == 1 and "vazia" in err
+
+
+def test_migrations_idempotent_and_clean_old_empty_usage(url, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", url)
+    from meridiano.engine import db, migrate
+    c = db.connect()
+    c.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+    # estado "antigo": só a migração 001, com 2 chamadas vazias e 1 útil de hoje
+    real = migrate.DIR
+    only1 = sorted(real.glob("001_*.sql"))[0]
+    c.execute(only1.read_text())
+    c.execute("CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())")
+    c.execute("INSERT INTO schema_migrations(name) VALUES (%s)", (only1.name,))
+    c.execute("INSERT INTO employees(slug,name,role,area,instructions,model) VALUES ('a','A','CEO','D','x','m'),('b','B','CEO','D','x','m')")
+    c.execute("INSERT INTO usage_log(employee_id,model,prompt_tokens,completion_tokens) SELECT id,'m',100,3500 FROM employees, generate_series(1,2)")
+    c.execute("INSERT INTO messages(from_id,body) SELECT id,'oi' FROM employees WHERE slug='b'")
+    assert migrate.migrate(c) == ["002_zera_uso_vazio.sql"]
+    assert migrate.migrate(c) == []
+    ok = c.execute("SELECT e.slug FROM usage_log u JOIN employees e ON e.id=u.employee_id WHERE u.ok GROUP BY 1").fetchall()
+    assert [r["slug"] for r in ok] == ["b"]  # b tem mensagem gravada: chamadas dele eram úteis

@@ -9,9 +9,8 @@ def connect():
 
 
 def init_schema(conn):
-    import pathlib
-    sql = (pathlib.Path(__file__).parent.parent / "sql" / "schema.sql").read_text()
-    conn.execute(sql)
+    from .migrate import migrate
+    return migrate(conn)
 
 
 def cash_cents(conn):
