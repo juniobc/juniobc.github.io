@@ -79,7 +79,7 @@ O painel mostra uma linha **"Loja: aberta/fechada (motivo)"** e, por produto, po
 ## Configurações e login do administrador com Google
 O dono entra no painel com **Entrar com Google** (OpenID Connect, code flow com PKCE, escopos só `openid` e `email`). Só a conta do dono (`OWNER_EMAIL`, padrão `juniobc@gmail.com`) entra; outra conta recebe 403 e a tentativa é registrada. A sessão (12 h) abre o painel sem digitar o token de leitura. Ações de administrador (chaves, token do Mercado Pago, modelos, contingência) exigem a sessão **e** o cabeçalho `X-CSRF`.
 
-**Credenciais do Google** (Client ID e Client Secret): arquivo `~/meridiano/secrets/google-oauth.json`, pasta 700, arquivo 600, exatamente:
+**Credenciais do Google** (Client ID e Client Secret): arquivo `~/meridiano/secrets/google-oauth.json` (outro caminho: variável `GOOGLE_OAUTH_FILE`), pasta 700, arquivo 600, exatamente:
 ```
 {"client_id": "...apps.googleusercontent.com", "client_secret": "...", "owner_email": "juniobc@gmail.com"}
 ```

@@ -2479,3 +2479,13 @@ def test_google_session_also_opens_the_panel_without_the_read_token(g):
     assert g.client.get("/api/state").status_code == 200 and g.client.get("/api/employees").status_code == 200   # só o cookie, sem X-Token
     assert TestClient(g.main.app, base_url="https://testserver").get("/api/state").status_code == 401
     assert g.client.get("/api/state", headers={"X-Token": "errado"}).status_code == 401                          # token errado não cai para a sessão
+
+
+def test_google_oauth_file_path_is_configurable(g, tmp_path, monkeypatch):
+    alt = tmp_path / "outro.json"
+    alt.write_text(_json.dumps({"client_id": _CID, "client_secret": _SEC, "owner_email": "juniobc@gmail.com"}))
+    monkeypatch.setenv("GOOGLE_OAUTH_FILE", str(alt))
+    assert g.client.get("/api/auth/google/start").status_code == 302                  # lê do caminho do ambiente, não de SECRETS_DIR
+    monkeypatch.setenv("GOOGLE_OAUTH_FILE", str(tmp_path / "nao-existe.json"))
+    r = g.client.get("/api/auth/google/start")
+    assert r.status_code == 503 and "não configurado" in r.text and _SEC not in r.text

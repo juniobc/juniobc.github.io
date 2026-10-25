@@ -24,7 +24,7 @@ EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,190}$")
 
 
 def path():
-    return os.path.join(config.SECRETS_DIR, FILE)
+    return config.env("GOOGLE_OAUTH_FILE") or os.path.join(config.SECRETS_DIR, FILE)
 
 
 def redirect_uri():
