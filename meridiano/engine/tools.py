@@ -5,10 +5,11 @@ import os
 import re
 import html
 import httpx
-from . import config
+from . import config, llm
 
 HIRER_RE = re.compile(r"presidente|ceo|diretor|diretora|gerente", re.I)
 FOUNDER_RE = re.compile(r"presidente|ceo", re.I)
+DECISION_RE = re.compile(r"presidente|ceo|jur[ií]dic", re.I)   # cargos de decisão: sugerem o melhor perfil de LLM liberado
 
 SPECS = [
     {"name": "web_search", "description": "Pesquisa na web e devolve títulos, links e trechos.",
@@ -31,7 +32,9 @@ SPECS = [
     {"name": "post_message", "description": "Envia mensagem a um colega (slug) ou ao mural (to vazio). Só colegas internos.",
      "parameters": {"type": "object", "properties": {"to": {"type": "string"}, "body": {"type": "string"}}, "required": ["body"]}},
     {"name": "hire_employee", "description": "Contrata um agente novo. Só cargos de chefia. Exige motivo.",
-     "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "role": {"type": "string"}, "area": {"type": "string"}, "instructions": {"type": "string", "description": "completas: função, como trabalha, o que entrega e como se mede"}, "reason": {"type": "string"}, "deliverable": {"type": "string", "description": "entrega mensurável por dia, ex.: 2 artigos"}}, "required": ["name", "role", "area", "instructions", "reason", "deliverable"]}},
+     "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "role": {"type": "string"}, "area": {"type": "string"}, "instructions": {"type": "string", "description": "completas: função, como trabalha, o que entrega e como se mede"}, "reason": {"type": "string"}, "deliverable": {"type": "string", "description": "entrega mensurável por dia, ex.: 2 artigos"}, "llm_profile": {"type": "string", "description": "opcional: rótulo de um perfil de list_llm_profiles que esteja liberado agora. Padrão: grátis"}}, "required": ["name", "role", "area", "instructions", "reason", "deliverable"]}},
+    {"name": "list_llm_profiles", "description": "Lista os perfis de LLM (modelo, preço por milhão de tokens, se é grátis) e se cada um está liberado agora para contratação. Só leitura; quem liga ou desliga é o dono.",
+     "parameters": {"type": "object", "properties": {}}},
     {"name": "team_review", "description": "Presidente ou CEO registram a revisão de equipe (a cada 30 turnos): quem entrega, quem não, e o que muda. Só vale depois de contratar até a meta mínima.",
      "parameters": {"type": "object", "properties": {"summary": {"type": "string"}}, "required": ["summary"]}},
     {"name": "fire_employee", "description": "Demite um funcionário (não pode ser Presidente, CEO nem você). Só chefia. Exige motivo. Cada contratação divide o orçamento de tokens do dia: demita quem não é mais necessário.",
@@ -463,6 +466,16 @@ def _run_tool(conn, me, name, args):
     try:
         if name == "web_search":
             return web_search(str(args["query"])[:200])
+        if name == "list_llm_profiles":
+            st = llm.settings(conn)
+            rows = conn.execute("SELECT * FROM llm_profiles ORDER BY is_free DESC, id").fetchall()
+            head = "MODO CONTINGÊNCIA LIGADO: só perfis grátis são chamados." if st["contingency"] else "Modo contingência desligado: pagos liberados dentro dos tetos diários."
+            lines = []
+            for r in rows:
+                ok, why = llm.usable(conn, r, st)
+                price = "grátis" if r["is_free"] else f"US$ {float(r['price_in_per_m']):.2f}/{float(r['price_out_per_m']):.2f} por milhão (entrada/saída)"
+                lines.append(f"- {r['label']} ({r['model']}): {price}; " + ("liberado" if ok else f"indisponível: {why}"))
+            return head + "\n" + "\n".join(lines)
         if name == "list_team":
             rows = conn.execute("SELECT slug,name,role,area FROM employees WHERE active ORDER BY id").fetchall()
             return "\n".join(f"{r['slug']}: {r['name']} - {r['role']} ({r['area']})" for r in rows)
@@ -660,10 +673,21 @@ def _run_tool(conn, me, name, args):
             if _emp_by_slug(conn, slug):
                 slug = f"{slug}-{n + 1}"
             model = config.DEFAULT_ROTATION[n % len(config.DEFAULT_ROTATION)]
+            prof = None
+            if str(args.get("llm_profile") or "").strip():
+                prof, err = llm.allowed_for_hire(conn, args["llm_profile"])
+                if err:
+                    return "erro: " + err
+            elif DECISION_RE.search(str(args["role"])):   # cargos de decisão pegam o melhor perfil liberado dentro do teto
+                prof = llm.best_profile(conn)
+            else:
+                prof = conn.execute("SELECT * FROM llm_profiles WHERE is_free AND enabled AND model=%s ORDER BY id LIMIT 1", (model,)).fetchone()
+            if prof:
+                model = prof["model"]
             conn.execute(
-                "INSERT INTO employees(slug,name,role,area,instructions,model,hired_by,hire_reason,deliverable) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                "INSERT INTO employees(slug,name,role,area,instructions,model,llm_profile_id,hired_by,hire_reason,deliverable) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (slug, str(args["name"])[:60], str(args["role"])[:80], str(args["area"])[:80],
-                 str(args["instructions"])[:3000], model, me["id"], str(args["reason"])[:1000], str(args["deliverable"])[:300]))
+                 str(args["instructions"])[:3000], model, prof["id"] if prof else None, me["id"], str(args["reason"])[:1000], str(args["deliverable"])[:300]))
             conn.execute("INSERT INTO messages(from_id,to_id,body) VALUES (%s,NULL,%s)",
                          (me["id"], f"Contratei {args['name']} ({args['role']}). Motivo: {str(args['reason'])[:300]}"))
             return f"contratado: {slug}"

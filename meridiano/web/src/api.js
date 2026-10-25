@@ -1,5 +1,16 @@
 export const getToken = () => { try { return localStorage.getItem('mtoken') || ''; } catch { return ''; } };
 export const setToken = (t) => { try { localStorage.setItem('mtoken', t); } catch {} };
+export const getAdmin = () => { try { return localStorage.getItem('matoken') || ''; } catch { return ''; } };
+export const setAdmin = (t) => { try { localStorage.setItem('matoken', t); } catch {} };
+// Ações de administrador (token guardado só neste navegador, como o de leitura).
+export async function admin(method, path, body) {
+  const r = await fetch('api/' + path, { method, headers: { 'Content-Type': 'application/json', 'X-Admin-Token': getAdmin() }, body: body === undefined ? undefined : JSON.stringify(body) });
+  let j = {};
+  try { j = await r.json(); } catch {}
+  if (r.status === 401) throw new Error('Token de administrador ausente ou inválido.');
+  if (!r.ok) throw new Error(typeof j.detail === 'string' ? j.detail : 'Não foi possível concluir (confira os campos).');
+  return j;
+}
 export async function api(path) {
   const r = await fetch('api/' + path, { headers: { 'X-Token': getToken() }, cache: 'no-store' });
   if (r.status === 401) throw new Error('401');

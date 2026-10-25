@@ -65,3 +65,6 @@ PUBLIC_BASE_URL = env("PUBLIC_BASE_URL", "https://meridiano.163-176-9-70.sslip.i
 MAX_OPEN_ORDERS = int(env("MAX_OPEN_ORDERS", "50"))   # pedidos abertos em 10 min antes de recusar novos (evita encher o banco)
 DOWNLOAD_DAYS = int(env("DOWNLOAD_DAYS", "7"))
 DOWNLOAD_MAX = int(env("DOWNLOAD_MAX", "5"))
+# Hosts de LLM permitidos (anti-exfiltração): perfil com outro endereço é recusado na criação e na chamada.
+LLM_HOSTS = ("inference-api.nousresearch.com", "openrouter.ai", "api.openai.com", "api.anthropic.com")
+LLM_TIMEOUT = int(env("LLM_TIMEOUT", "120"))

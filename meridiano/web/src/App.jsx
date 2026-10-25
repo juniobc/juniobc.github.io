@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react';
 import Office from './Office.jsx';
-import { api, post, sendMpToken, sendStoreSettings, getToken, setToken } from './api.js';
+import Models from './Models.jsx';
+import { api, post, sendMpToken, sendStoreSettings, getToken, setToken, getAdmin } from './api.js';
 
 const brl = (n) => 'R$ ' + Number(n).toFixed(2).replace('.', ',');
-const TABS = ['Escritório', 'Tarefas', 'Produtos', 'Ideias', 'Caixa'];
+const TABS = ['Escritório', 'Tarefas', 'Produtos', 'Ideias', 'Caixa', 'Modelos'];
 const MP_REQUEST = 'Preciso do access token do Mercado Pago';
 
 function MpTokenCard({ onSaved }) {
-  const [admin, setAdmin] = useState('');
+  const [admin, setAdmin] = useState(getAdmin());
   const [tok, setTok] = useState('');
   const [nome, setNome] = useState('');
   const [email, setEmail] = useState('');
@@ -50,13 +51,14 @@ function MpTokenCard({ onSaved }) {
 
 export default function App() {
   const [auth, setAuth] = useState(!!getToken());
-  const [d, setD] = useState({ state: null, emps: [], msgs: [], tasks: [], prods: [], ledger: [], reqs: [], acts: [], hist: [], engine: null, loja: [], opps: [], orders: [], lojaStatus: null });
+  const [d, setD] = useState({ state: null, emps: [], msgs: [], tasks: [], prods: [], ledger: [], reqs: [], acts: [], hist: [], engine: null, loja: [], opps: [], orders: [], lojaStatus: null, llm: null });
   const [err, setErr] = useState('');
   const [loginErr, setLoginErr] = useState('');
   const [tab, setTab] = useState(0);
   const [sel, setSel] = useState(null);
   const [card, setCard] = useState(null);
   const [now, setNow] = useState(Date.now());
+  const [rev, setRev] = useState(0);
   const reduced = typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   useEffect(() => { const id = setInterval(() => setNow(Date.now()), 15000); return () => clearInterval(id); }, []);
   useEffect(() => {
@@ -71,16 +73,16 @@ export default function App() {
     let on = true;
     const load = async () => {
       try {
-        const [state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps, orders, lojaStatus] = await Promise.all(
-          ['state', 'employees', 'messages?limit=40', 'tasks', 'products', 'ledger', 'owner-requests', 'activity?limit=30', 'history', 'engine', 'store/products', 'opportunities', 'orders', 'store/status'].map(api));
-        if (on) { setD({ state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps, orders, lojaStatus }); setErr(''); }
+        const [state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps, orders, lojaStatus, llm] = await Promise.all(
+          ['state', 'employees', 'messages?limit=40', 'tasks', 'products', 'ledger', 'owner-requests', 'activity?limit=30', 'history', 'engine', 'store/products', 'opportunities', 'orders', 'store/status', 'llm'].map(api));
+        if (on) { setD({ state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps, orders, lojaStatus, llm }); setErr(''); }
       } catch (e) {
         if (e.message === '401') { setToken(''); setLoginErr('Token inválido. Confira e tente de novo.'); setAuth(false); } else setErr('Sem conexão com o servidor.');
       }
     };
     load(); const id = setInterval(load, 5000);
     return () => { on = false; clearInterval(id); };
-  }, [auth]);
+  }, [auth, rev]);
 
   if (!auth) return <Login error={loginErr} onDone={() => { setLoginErr(''); setAuth(true); }} />;
   const s = d.state;
@@ -176,6 +178,8 @@ export default function App() {
             <small>{new Date(l.created_at).toLocaleString('pt-BR')} · {l.source}</small></li>))}
           {!d.ledger.length && <li className="note">Nenhum lançamento. Caixa: R$ 0,00.</li>}</ul>
       </>}
+
+      {tab === 5 && <Models llm={d.llm} reload={() => setRev((x) => x + 1)} />}
     </div>
   );
 }
