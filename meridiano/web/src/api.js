@@ -23,3 +23,14 @@ export async function sendMpToken(adminToken, accessToken) {
   if (!r.ok) throw new Error(r.status === 401 ? 'Token de administrador inválido.' : (j.detail || 'Não foi possível enviar.'));
   return j;
 }
+export async function sendStoreSettings(adminToken, sellerName, contactEmail) {
+  const r = await fetch('api/store/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Admin-Token': adminToken },
+    body: JSON.stringify({ seller_name: sellerName, contact_email: contactEmail }),
+  });
+  let j = {};
+  try { j = await r.json(); } catch {}
+  if (!r.ok) throw new Error(r.status === 401 ? 'Token de administrador inválido.' : (j.detail || (r.status === 422 ? 'Confira o nome e o e-mail.' : 'Não foi possível enviar.')));
+  return j;
+}

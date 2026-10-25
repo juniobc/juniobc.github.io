@@ -136,7 +136,7 @@ def test_migrations_idempotent_and_clean_old_empty_usage(url, monkeypatch):
     c.execute("INSERT INTO employees(slug,name,role,area,instructions,model) VALUES ('a','A','CEO','D','x','m'),('b','B','CEO','D','x','m')")
     c.execute("INSERT INTO usage_log(employee_id,model,prompt_tokens,completion_tokens) SELECT id,'m',100,3500 FROM employees, generate_series(1,2)")
     c.execute("INSERT INTO messages(from_id,body) SELECT id,'oi' FROM employees WHERE slug='b'")
-    assert migrate.migrate(c) == ["002_zera_uso_vazio.sql", "003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql"]
+    assert migrate.migrate(c) == ["002_zera_uso_vazio.sql", "003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql", "010_loja.sql"]
     assert migrate.migrate(c) == []
     ok = c.execute("SELECT e.slug FROM usage_log u JOIN employees e ON e.id=u.employee_id WHERE u.ok GROUP BY 1").fetchall()
     assert [r["slug"] for r in ok] == ["b"]  # b tem mensagem gravada: chamadas dele eram úteis
@@ -210,7 +210,7 @@ def test_migration_003_cleans_duplicates(url, monkeypatch):
         c.execute("INSERT INTO products(name,file_path) VALUES ('Toolkit X','a.txt')")
         c.execute("INSERT INTO tasks(title) VALUES ('Pesquisar copy')")
     c.execute("INSERT INTO tasks(title,details) VALUES ('Receber fontes','mandar os arquivos .txt fonte')")
-    assert migrate.migrate(c) == ["003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql"]
+    assert migrate.migrate(c) == ["003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql", "010_loja.sql"]
     assert c.execute("SELECT COUNT(*) AS n FROM products").fetchone()["n"] == 1
     assert c.execute("SELECT COUNT(*) AS n FROM tasks WHERE status='open'").fetchone()["n"] == 1
 
@@ -397,7 +397,7 @@ def test_migration_006_archives_existing_messages(url, monkeypatch):
     for f in files[:5]:
         c.execute(f.read_text()); c.execute("INSERT INTO schema_migrations(name) VALUES (%s)", (f.name,))
     c.execute("INSERT INTO messages(body) VALUES ('velha 1'),('velha 2')")
-    assert migrate.migrate(c) == ["006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql"]
+    assert migrate.migrate(c) == ["006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql", "010_loja.sql"]
     c.execute("INSERT INTO messages(body) VALUES ('nova')")
     assert [r["body"] for r in c.execute("SELECT body FROM messages WHERE NOT archived").fetchall()] == ["nova"]
 
@@ -741,7 +741,7 @@ def test_migration_009_supersedes_old_owner_requests(url, monkeypatch):
         c.execute(f.read_text()); c.execute("INSERT INTO schema_migrations(name) VALUES (%s)", (f.name,))
     c.execute("INSERT INTO owner_requests(body) VALUES ('Produto Toolkit pronto, preciso que o Junio publique no marketplace'),('Abrir conta na Hotmart com CPF')")
     c.execute("INSERT INTO owner_requests(body,done) VALUES ('antigo já feito',true)")
-    assert migrate.migrate(c) == ["009_vendas_no_servidor.sql"]
+    assert migrate.migrate(c) == ["009_vendas_no_servidor.sql", "010_loja.sql"]
     rows = c.execute("SELECT done,resolution FROM owner_requests ORDER BY id").fetchall()
     assert all(r["done"] for r in rows)
     assert [r["resolution"] for r in rows[:2]] == ["substituído: as vendas passam a ser feitas no próprio servidor, com Mercado Pago"] * 2
@@ -756,7 +756,10 @@ def test_token_request_is_the_only_owner_request_and_closes_when_configured(conn
     monkeypatch.setattr(ss, "verify", lambda t: ("ok", "token aceito pelo Mercado Pago"))
     assert ss.save_token("APP_USR-" + "a1b2c3d4" * 6)[0]
     ss.sync_owner_request(conn)
-    assert conn.execute("SELECT done,resolution FROM owner_requests").fetchone() == {"done": True, "resolution": "token recebido"}
+    assert conn.execute("SELECT done FROM owner_requests").fetchone()["done"] is False          # falta a identificação do vendedor
+    conn.execute("INSERT INTO store_settings(key,value) VALUES ('seller_name','Junio Teste'),('contact_email','junio@example.com')")
+    ss.sync_owner_request(conn)
+    assert conn.execute("SELECT done,resolution FROM owner_requests").fetchone() == {"done": True, "resolution": "token e identificação recebidos"}
     ss.sync_owner_request(conn)
     assert conn.execute("SELECT COUNT(*) AS n FROM owner_requests").fetchone()["n"] == 1   # não reabre
 
@@ -788,8 +791,11 @@ def test_api_token_is_stored_private_and_never_shown(conn, tmp_path, monkeypatch
     st = c.get("/api/secrets/mp-token", headers={"X-Token": "leitura"})
     assert st.json()["configurado"] is True and TOKEN not in st.text
     assert c.get("/api/secrets/mp-token").status_code == 401
-    # o pedido ao dono foi fechado; e o token não está em nenhuma tabela do banco
+    # falta a identificação: o pedido continua aberto até ela chegar
+    assert conn.execute("SELECT done FROM owner_requests").fetchone()["done"] is False
+    assert c.post("/api/store/settings", json={"seller_name": "Junio Teste", "contact_email": "junio@example.com"}, headers={"X-Admin-Token": "admin"}).status_code == 200
     assert conn.execute("SELECT done FROM owner_requests").fetchone()["done"] is True
+    # o token não está em nenhuma tabela do banco
     tabelas = [t["table_name"] for t in conn.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public'").fetchall()]
     for t in tabelas:
         dump = str(conn.execute(f'SELECT * FROM "{t}"').fetchall())
@@ -817,3 +823,154 @@ def test_token_never_reaches_tool_sandbox_or_agent_surface(tmp_path, monkeypatch
     assert not any("secret" in n or "token" in n or "mp_" in n for n in names)
     assert os.path.expanduser("~") in config.SECRETS_DIR or config.SECRETS_DIR.startswith(os.path.expanduser("~"))
     assert os.path.realpath(os.path.expanduser("~")) in sandbox.hide_dirs() or any(config.SECRETS_DIR.startswith(h) for h in sandbox.hide_dirs())
+
+
+# ---------- loja pública (etapa 2) ----------
+
+GOOD_COPY = {"headline": "Aprenda a escrever textos de venda claros", "subtitle": "Um guia prático, direto ao ponto",
+             "pitch": "Material em português para quem quer vender melhor sem enrolar o cliente.",
+             "benefits": ["Estrutura de página de vendas passo a passo", "Como pesquisar o seu público", "Modelos de títulos para testar"],
+             "audience": "Pequenos vendedores online que escrevem os próprios textos.",
+             "faq": [{"q": "Tem reembolso?", "a": "Sim, em até 7 dias."}, {"q": "Em que formato vem?", "a": "Texto para ler no celular."}]}
+
+
+def _ready_product(conn, name="Copy de Vendas"):
+    from meridiano.engine import plan, tools
+    ceo = _ceo(conn)
+    plan.ensure(conn)
+    n = conn.execute("SELECT COUNT(*) AS n FROM product_sections s JOIN products p ON p.id=s.product_id WHERE p.name=%s", (name,)).fetchone()["n"]
+    for i in range(1, n + 1):
+        tools.run_tool(conn, ceo, "write_section", {"product_name": name, "section_number": i, "content": WORDS(420)})
+    return ceo
+
+
+def _open_store(conn, name="Copy de Vendas", price=29.9, copy=None):
+    from meridiano.engine import tools
+    ceo = _ready_product(conn, name)
+    out = tools.run_tool(conn, ceo, "write_store_copy", dict(copy or GOOD_COPY, product_name=name))
+    assert "salvo" in out, out
+    assert "definido" in tools.run_tool(conn, ceo, "set_price", {"product_name": name, "price_brl": price, "reason": "preço de entrada para guias deste tamanho"})
+    conn.execute("INSERT INTO store_settings(key,value) VALUES ('seller_name','Junio Teste'),('contact_email','junio@example.com') ON CONFLICT DO NOTHING")
+    return ceo
+
+
+def _client(conn, monkeypatch):
+    monkeypatch.setenv("MERIDIANO_API_TOKEN", "leitura"); monkeypatch.setenv("MERIDIANO_ADMIN_TOKEN", "admin")
+    from meridiano.api import main
+    main._conn = conn
+    return TestClient(main.app)
+
+
+@pytest.mark.parametrize("patch,fragment", [
+    ({"headline": ""}, "headline"),
+    ({"headline": "Ganhe dinheiro garantido"}, "promessas proibidas"),
+    ({"pitch": "Resultado 100% certo para você"}, "promessas proibidas"),
+    ({"benefits": ["só um", "dois"]}, "benefits"),
+    ({"faq": [{"q": "Só uma?", "a": "sim"}]}, "faq"),
+    ({"audience": "<b>qualquer um</b>"}, "HTML"),
+    ({"subtitle": "x" * 300}, "subtitle"),
+])
+def test_sales_copy_is_validated(conn, patch, fragment):
+    from meridiano.engine import tools
+    ceo = _ready_product(conn)
+    out = tools.run_tool(conn, ceo, "write_store_copy", dict(GOOD_COPY, product_name="Copy de Vendas", **patch))
+    assert out.startswith("erro: texto de venda recusado") and fragment in out, out
+    assert conn.execute("SELECT COUNT(*) AS n FROM product_store").fetchone()["n"] == 0
+
+
+def test_copy_and_price_rules(conn):
+    from meridiano.engine import plan, tools
+    ceo = _ceo(conn); plan.ensure(conn)
+    assert "ainda não está pronto" in tools.run_tool(conn, ceo, "write_store_copy", dict(GOOD_COPY, product_name="Copy de Vendas"))
+    _ready_product(conn)
+    dev = _mk(conn, "Davi", "Analista")
+    assert tools.run_tool(conn, dev, "set_price", {"product_name": "Copy de Vendas", "price_brl": 29, "reason": "porque sim"}).startswith("erro: só Presidente ou CEO")
+    for bad in (8.99, 0, -5, 1000.01):
+        assert tools.run_tool(conn, ceo, "set_price", {"product_name": "Copy de Vendas", "price_brl": bad, "reason": "teste de faixa"}).startswith("erro"), bad
+    assert tools.run_tool(conn, ceo, "set_price", {"product_name": "Copy de Vendas", "price_brl": 9, "reason": "preço mínimo permitido"}).startswith("preço")
+    assert conn.execute("SELECT price_cents FROM products WHERE name='Copy de Vendas'").fetchone()["price_cents"] == 900
+
+
+def test_store_page_is_static_escaped_and_locked_down(conn, monkeypatch):
+    c = _client(conn, monkeypatch)
+    xss = dict(GOOD_COPY, headline="Guia <script>alert(1)</script>", pitch='Aprenda "rápido" & bem <img src=x onerror=alert(1)>')
+    _open_store(conn, copy=dict(xss, headline="Guia de copy", pitch="Texto normal sobre vendas"))      # base válida
+    from meridiano.engine import store
+    conn.execute("UPDATE product_store SET headline=%s, pitch=%s", (xss["headline"], xss["pitch"]))     # força conteúdo hostil direto no banco
+    r = c.get("/pub/loja/copy-de-vendas/")
+    assert r.status_code == 200
+    html = r.text
+    assert "<script" not in html.lower() and "<img" not in html.lower() and "onerror" not in html.split("<main>")[1].replace("&lt;img src=x onerror", "")    # tudo escapado
+    assert "&lt;script&gt;" in html and "R$ 29,90" in html
+    csp = r.headers["content-security-policy"]
+    assert "default-src 'none'" in csp and "script-src 'none'" in csp and "frame-ancestors 'none'" in csp and "unsafe-inline" not in csp
+    nonce = csp.split("'nonce-")[1].split("'")[0]
+    assert f'<style nonce="{nonce}">' in html
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert c.get("/pub/loja/copy-de-vendas/").headers["content-security-policy"] != csp                 # nonce novo a cada resposta
+    # conteúdo real: sumário vem das seções, não do agente
+    assert "8 seções" in html and "cerca de 3360 palavras" in html and "Princípios de copy que converte" in html
+    # legal: reembolso 7 dias (CDC), aviso educativo, vendedor identificado
+    assert "7 dias" in html and "art. 49" in html and "Material educativo" in html
+    assert "Junio Teste" in html and "mailto:junio@example.com" in html
+    # sem checkout ainda: nada de botão de compra
+    assert "Pagamento em breve" in html and "<form" not in html and "Comprar" not in html
+    assert "script" not in html.split("</style>")[1].lower().replace("&lt;script&gt;alert(1)&lt;/script&gt;", "")
+    assert c.post("/pub/loja/copy-de-vendas/comprar").status_code == 503                                  # ninguém é cobrado
+
+
+def test_store_publishes_only_when_everything_is_ready(conn, monkeypatch):
+    from meridiano.engine import tools
+    c = _client(conn, monkeypatch)
+    assert c.get("/pub/loja/").status_code == 200 and "Loja em preparação" in c.get("/pub/loja/").text
+    ceo = _ready_product(conn)
+    assert c.get("/pub/loja/copy-de-vendas/").status_code == 404                                           # pronto, mas sem texto/preço
+    tools.run_tool(conn, ceo, "write_store_copy", dict(GOOD_COPY, product_name="Copy de Vendas"))
+    assert c.get("/pub/loja/copy-de-vendas/").status_code == 404                                           # falta preço
+    tools.run_tool(conn, ceo, "set_price", {"product_name": "Copy de Vendas", "price_brl": 19.9, "reason": "preço de entrada"})
+    assert c.get("/pub/loja/copy-de-vendas/").status_code == 404                                           # falta identificar o vendedor
+    conn.execute("INSERT INTO store_settings(key,value) VALUES ('seller_name','Junio Teste'),('contact_email','junio@example.com')")
+    assert c.get("/pub/loja/copy-de-vendas/").status_code == 200
+    assert "Aprenda a escrever textos de venda claros" in c.get("/pub/loja/").text
+    tools.run_tool(conn, ceo, "request_rewrite", {"product_name": "Copy de Vendas", "section_number": 2, "reason": "seção fraca demais"})   # volta a rascunho
+    assert c.get("/pub/loja/copy-de-vendas/").status_code == 404
+    for bad in ("../etc/passwd", "COPY", "x" * 200, "%00"):
+        assert c.get(f"/pub/loja/{bad}/").status_code in (404, 307, 308)
+
+
+def test_store_settings_endpoint_and_panel_listing(conn, monkeypatch):
+    c = _client(conn, monkeypatch)
+    body = {"seller_name": "Junio Teste", "contact_email": "junio@example.com"}
+    assert c.post("/api/store/settings", json=body).status_code == 401
+    assert c.post("/api/store/settings", json=body, headers={"X-Token": "leitura"}).status_code == 401
+    assert c.post("/api/store/settings", json=dict(body, contact_email="sem-arroba"), headers={"X-Admin-Token": "admin"}).status_code == 400
+    assert c.post("/api/store/settings", json=body, headers={"X-Admin-Token": "admin"}).status_code == 200
+    g = c.get("/api/store/settings", headers={"X-Token": "leitura"}).json()
+    assert g == {"seller_name": "Junio Teste", "contact_email": "junio@example.com", "pronta": True}
+    _open_store(conn)
+    lst = {p["name"]: p for p in c.get("/api/store/products", headers={"X-Token": "leitura"}).json()}
+    assert lst["Copy de Vendas"]["publicado"] and lst["Copy de Vendas"]["url"] == "/pub/loja/copy-de-vendas/"
+    assert not lst["Toolkit do Vendedor E-commerce"]["publicado"]
+
+
+def test_prompt_directs_copy_then_price_once_products_are_ready(conn):
+    from meridiano.engine import agent, tools
+    ceo = _ceo(conn)
+    for n in ("Copy de Vendas", "Toolkit do Vendedor E-commerce", "Plano Mestre Financeiro Pessoal"):
+        _ready_product(conn, n)
+    assert "write_store_copy" in agent.build_prompt(conn, ceo) and "texto de venda" in agent.build_prompt(conn, ceo)
+    tools.run_tool(conn, ceo, "write_store_copy", dict(GOOD_COPY, product_name="Copy de Vendas"))
+    assert "Toolkit do Vendedor" in agent.build_prompt(conn, ceo)                                           # próximo produto sem texto
+    for n in ("Toolkit do Vendedor E-commerce", "Plano Mestre Financeiro Pessoal"):
+        tools.run_tool(conn, ceo, "write_store_copy", dict(GOOD_COPY, product_name=n))
+    assert "set_price" in agent.build_prompt(conn, ceo) and "R$ 9,00" in agent.build_prompt(conn, ceo)
+    for n in ("Copy de Vendas", "Toolkit do Vendedor E-commerce", "Plano Mestre Financeiro Pessoal"):
+        tools.run_tool(conn, ceo, "set_price", {"product_name": n, "price_brl": 24.9, "reason": "preço de entrada"})
+    assert "todos os produtos estão na loja" in agent.build_prompt(conn, ceo)
+
+
+def test_financial_product_page_shows_investment_disclaimer(conn, monkeypatch):
+    c = _client(conn, monkeypatch)
+    _open_store(conn, name="Plano Mestre Financeiro Pessoal", price=39.9)
+    html = c.get("/pub/loja/plano-mestre-financeiro-pessoal/").text
+    assert "Não constitui recomendação de investimento" in html and "7 dias" in html

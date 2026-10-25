@@ -210,6 +210,11 @@ def add_entry(e: Entry):
     return {"id": r["id"], "caixa": db.cash_cents(c) / 100}
 
 
+from . import store_routes  # noqa: E402
+
+app.include_router(store_routes.router)
+store_routes.register(app, read_auth, admin_auth, conn)
+
 _web = pathlib.Path(__file__).parent.parent / "web" / "dist"
 if _web.is_dir():
     app.mount("/", StaticFiles(directory=_web, html=True), name="web")
