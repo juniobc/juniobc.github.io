@@ -28,6 +28,19 @@ def beat(conn, current=None, last_turn=None, delay=0, reason="nenhum"):
         (current, last_turn, last_turn, delay, delay, reason))
 
 
+def beat_turn(conn, done=None):
+    """Um turno terminou: guarda quem foi o último a concluir (sem mexer em quem está rodando agora)."""
+    conn.execute("UPDATE engine_status SET heartbeat_at=now(), last_turn_employee_id=COALESCE(%s::integer, last_turn_employee_id), "
+                 "last_turn_at=CASE WHEN %s::integer IS NULL THEN last_turn_at ELSE now() END WHERE id=1", (done, done))
+
+
+def beat_workers(conn, total, running_names, next_in, reason):
+    """Batimento do motor com os turnos em paralelo: quantos trabalhadores, quem está em turno, quando é o próximo."""
+    conn.execute("UPDATE engine_status SET heartbeat_at=now(), workers_total=%s, workers_running=%s, running_names=%s, "
+                 "next_turn_at=now() + make_interval(secs => %s::integer), sleep_s=%s::integer, wait_reason=%s WHERE id=1",
+                 (total, len(running_names), ", ".join(running_names), next_in, max(next_in, 5), reason))
+
+
 def record_isolation(conn, refresh=True):
     """Roda o autoteste de isolamento (se refresh) e grava o resultado para o painel. Se o portão acabou de abrir,
     processa os rascunhos de ferramentas. Devolve o estado do portão."""

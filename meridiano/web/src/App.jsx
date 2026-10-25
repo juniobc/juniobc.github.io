@@ -111,10 +111,12 @@ export default function App() {
         <div className="card" aria-live="polite"><b>Agora:</b>{' '}
           {nowAct ? <>{nowAct.name}{nowAct.target_name ? ` → ${nowAct.target_name}` : ''}: {nowAct.text || nowAct.kind} <small>({ago(nowAct.started_at)})</small></> : 'ninguém agiu nos últimos 3 minutos.'}</div>
         {d.engine && <p className="note">Motor: {d.engine.vivo ? 'vivo' : 'PARADO'}
-          {d.engine.funcionario_da_vez ? ` · agora é a vez de ${d.engine.funcionario_da_vez}` : ''}
+          {d.engine.trabalhadores ? ` · turnos rodando: ${d.engine.turnos_rodando} de ${d.engine.trabalhadores}` : ''}
+          {d.engine.funcionarios_da_vez?.length ? ` (${d.engine.funcionarios_da_vez.join(', ')})` : ''}
           {d.engine.proximo_turno_em_s != null ? ` · próximo turno em ${d.engine.proximo_turno_em_s}s` : ''}
           {d.engine.motivo_espera && d.engine.motivo_espera !== 'nenhum' ? ` · espera por: ${d.engine.motivo_espera}` : ''}
           {d.engine.ultimo_turno_por ? ` · último turno: ${d.engine.ultimo_turno_por}` : ''}<br />
+          Equipe: {d.engine.equipe?.funcionarios} de meta {d.engine.equipe?.meta}, próxima revisão em {d.engine.equipe?.proxima_revisao_em_turnos} turnos<br />
           Ferramentas: {d.engine.isolamento_ferramentas?.ligadas ? 'ligadas' : 'desligadas'} ({d.engine.isolamento_ferramentas?.motivo || 'não verificado'})</p>}
         <Office employees={d.emps} selected={sel} onSelect={setSel} reduced={reduced} />
         <p className="note">Ações (escrever, pesquisar, conversar, reunião, contratar, demitir) vêm do banco. Quem está parado passeia pela copa e pelo corredor: isso é só animação de ambiente.</p>

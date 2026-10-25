@@ -31,7 +31,9 @@ SPECS = [
     {"name": "post_message", "description": "Envia mensagem a um colega (slug) ou ao mural (to vazio). Só colegas internos.",
      "parameters": {"type": "object", "properties": {"to": {"type": "string"}, "body": {"type": "string"}}, "required": ["body"]}},
     {"name": "hire_employee", "description": "Contrata um agente novo. Só cargos de chefia. Exige motivo.",
-     "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "role": {"type": "string"}, "area": {"type": "string"}, "instructions": {"type": "string"}, "reason": {"type": "string"}}, "required": ["name", "role", "area", "instructions", "reason"]}},
+     "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "role": {"type": "string"}, "area": {"type": "string"}, "instructions": {"type": "string", "description": "completas: função, como trabalha, o que entrega e como se mede"}, "reason": {"type": "string"}, "deliverable": {"type": "string", "description": "entrega mensurável por dia, ex.: 2 artigos"}}, "required": ["name", "role", "area", "instructions", "reason", "deliverable"]}},
+    {"name": "team_review", "description": "Presidente ou CEO registram a revisão de equipe (a cada 30 turnos): quem entrega, quem não, e o que muda. Só vale depois de contratar até a meta mínima.",
+     "parameters": {"type": "object", "properties": {"summary": {"type": "string"}}, "required": ["summary"]}},
     {"name": "fire_employee", "description": "Demite um funcionário (não pode ser Presidente, CEO nem você). Só chefia. Exige motivo. Cada contratação divide o orçamento de tokens do dia: demita quem não é mais necessário.",
      "parameters": {"type": "object", "properties": {"slug": {"type": "string"}, "reason": {"type": "string"}}, "required": ["slug", "reason"]}},
     {"name": "start_meeting", "description": "Convoca uma reunião curta com colegas (slugs) sobre um assunto. Registra no mural.",
@@ -403,6 +405,8 @@ def _record_activity(conn, me, name, args, out):
             if e:
                 activity(conn, e["id"], "reunião", str(args.get("topic", ""))[:120])
         activity(conn, me["id"], "reunião", str(args.get("topic", ""))[:120])
+    elif name == "team_review":
+        activity(conn, me["id"], "planejando", "Registrou a revisão de equipe")
     elif name == "hire_employee":
         activity(conn, me["id"], "contratando", f"Contratou {str(args.get('name', ''))[:60]}")
     elif name == "fire_employee":
@@ -544,6 +548,24 @@ def _run_tool(conn, me, name, args):
                 to_id = to["id"]
             conn.execute("INSERT INTO messages(from_id,to_id,body) VALUES (%s,%s,%s)", (me["id"], to_id, str(args["body"])[:1000]))
             return "mensagem registrada"
+        if name == "team_review":
+            from . import team
+            if not FOUNDER_RE.search(me["role"]):
+                return "erro: só Presidente ou CEO registram a revisão de equipe"
+            st = team.status(conn)
+            if st["below_target"]:
+                return f"erro: a equipe tem {st['headcount']} pessoa(s) e a meta mínima é {st['target']}: contrate antes (hire_employee, um por turno) e registre a revisão depois"
+            if not st["review_due"]:
+                return f"erro: a próxima revisão só vale em {st['next_review_in']} turno(s)"
+            summary = str(args["summary"]).strip()
+            if len(summary) < 40:
+                return "erro: a revisão precisa de um resumo (quem entrega, quem não, o que muda), com pelo menos 40 caracteres"
+            if st["overloaded"]:   # estado real: tarefas demais por pessoa. Só destrava contratando ou aliviando a fila
+                return (f"erro: há {st['open_tasks']} tarefas abertas para {st['headcount']} pessoas (mais de {config.MAX_TASKS_PER_PERSON} por pessoa): contrate um especialista "
+                        "ou conclua/cancele tarefas antes de registrar a revisão")
+            conn.execute("INSERT INTO team_reviews(turn_no,by_id,headcount,open_tasks,summary) VALUES (%s,%s,%s,%s,%s)", (st["turns"], me["id"], st["headcount"], st["open_tasks"], summary[:1000]))
+            conn.execute("INSERT INTO messages(from_id,to_id,body) VALUES (%s,NULL,%s)", (me["id"], f"Revisão de equipe ({st['headcount']} pessoas, {st['open_tasks']} tarefas abertas): {summary[:300]}"))
+            return "revisão de equipe registrada"
         if name == "fire_employee":
             if not HIRER_RE.search(me["role"]):
                 return "erro: seu cargo não pode demitir"
@@ -582,14 +604,20 @@ def _run_tool(conn, me, name, args):
             n = conn.execute("SELECT COUNT(*) AS n FROM employees WHERE active").fetchone()["n"]
             if n >= config.MAX_EMPLOYEES:
                 return "erro: limite de funcionários atingido"
+            if len(str(args.get("instructions", "")).strip()) < 60:
+                return "erro: instruções incompletas (mínimo 60 caracteres): descreva a função, como a pessoa trabalha, o que entrega e como se mede"
+            if len(str(args.get("reason", "")).strip()) < 10:
+                return "erro: informe o motivo da contratação com clareza"
+            if len(str(args.get("deliverable", "")).strip()) < 10:
+                return "erro: toda contratação precisa de uma entrega mensurável (ex.: '2 artigos por dia')"
             slug = slugify(args["name"])
             if _emp_by_slug(conn, slug):
                 slug = f"{slug}-{n + 1}"
             model = config.DEFAULT_ROTATION[n % len(config.DEFAULT_ROTATION)]
             conn.execute(
-                "INSERT INTO employees(slug,name,role,area,instructions,model,hired_by,hire_reason) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                "INSERT INTO employees(slug,name,role,area,instructions,model,hired_by,hire_reason,deliverable) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (slug, str(args["name"])[:60], str(args["role"])[:80], str(args["area"])[:80],
-                 str(args["instructions"])[:3000], model, me["id"], str(args["reason"])[:1000]))
+                 str(args["instructions"])[:3000], model, me["id"], str(args["reason"])[:1000], str(args["deliverable"])[:300]))
             conn.execute("INSERT INTO messages(from_id,to_id,body) VALUES (%s,NULL,%s)",
                          (me["id"], f"Contratei {args['name']} ({args['role']}). Motivo: {str(args['reason'])[:300]}"))
             return f"contratado: {slug}"
