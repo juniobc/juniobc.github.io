@@ -136,7 +136,7 @@ def test_migrations_idempotent_and_clean_old_empty_usage(url, monkeypatch):
     c.execute("INSERT INTO employees(slug,name,role,area,instructions,model) VALUES ('a','A','CEO','D','x','m'),('b','B','CEO','D','x','m')")
     c.execute("INSERT INTO usage_log(employee_id,model,prompt_tokens,completion_tokens) SELECT id,'m',100,3500 FROM employees, generate_series(1,2)")
     c.execute("INSERT INTO messages(from_id,body) SELECT id,'oi' FROM employees WHERE slug='b'")
-    assert migrate.migrate(c) == ["002_zera_uso_vazio.sql", "003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql", "010_loja.sql"]
+    assert migrate.migrate(c) == ["002_zera_uso_vazio.sql", "003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql", "010_loja.sql", "011_oportunidades.sql"]
     assert migrate.migrate(c) == []
     ok = c.execute("SELECT e.slug FROM usage_log u JOIN employees e ON e.id=u.employee_id WHERE u.ok GROUP BY 1").fetchall()
     assert [r["slug"] for r in ok] == ["b"]  # b tem mensagem gravada: chamadas dele eram úteis
@@ -210,7 +210,7 @@ def test_migration_003_cleans_duplicates(url, monkeypatch):
         c.execute("INSERT INTO products(name,file_path) VALUES ('Toolkit X','a.txt')")
         c.execute("INSERT INTO tasks(title) VALUES ('Pesquisar copy')")
     c.execute("INSERT INTO tasks(title,details) VALUES ('Receber fontes','mandar os arquivos .txt fonte')")
-    assert migrate.migrate(c) == ["003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql", "010_loja.sql"]
+    assert migrate.migrate(c) == ["003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql", "010_loja.sql", "011_oportunidades.sql"]
     assert c.execute("SELECT COUNT(*) AS n FROM products").fetchone()["n"] == 1
     assert c.execute("SELECT COUNT(*) AS n FROM tasks WHERE status='open'").fetchone()["n"] == 1
 
@@ -397,7 +397,7 @@ def test_migration_006_archives_existing_messages(url, monkeypatch):
     for f in files[:5]:
         c.execute(f.read_text()); c.execute("INSERT INTO schema_migrations(name) VALUES (%s)", (f.name,))
     c.execute("INSERT INTO messages(body) VALUES ('velha 1'),('velha 2')")
-    assert migrate.migrate(c) == ["006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql", "010_loja.sql"]
+    assert migrate.migrate(c) == ["006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql", "010_loja.sql", "011_oportunidades.sql"]
     c.execute("INSERT INTO messages(body) VALUES ('nova')")
     assert [r["body"] for r in c.execute("SELECT body FROM messages WHERE NOT archived").fetchall()] == ["nova"]
 
@@ -741,7 +741,7 @@ def test_migration_009_supersedes_old_owner_requests(url, monkeypatch):
         c.execute(f.read_text()); c.execute("INSERT INTO schema_migrations(name) VALUES (%s)", (f.name,))
     c.execute("INSERT INTO owner_requests(body) VALUES ('Produto Toolkit pronto, preciso que o Junio publique no marketplace'),('Abrir conta na Hotmart com CPF')")
     c.execute("INSERT INTO owner_requests(body,done) VALUES ('antigo já feito',true)")
-    assert migrate.migrate(c) == ["009_vendas_no_servidor.sql", "010_loja.sql"]
+    assert migrate.migrate(c) == ["009_vendas_no_servidor.sql", "010_loja.sql", "011_oportunidades.sql"]
     rows = c.execute("SELECT done,resolution FROM owner_requests ORDER BY id").fetchall()
     assert all(r["done"] for r in rows)
     assert [r["resolution"] for r in rows[:2]] == ["substituído: as vendas passam a ser feitas no próprio servidor, com Mercado Pago"] * 2
@@ -974,3 +974,80 @@ def test_financial_product_page_shows_investment_disclaimer(conn, monkeypatch):
     _open_store(conn, name="Plano Mestre Financeiro Pessoal", price=39.9)
     html = c.get("/pub/loja/plano-mestre-financeiro-pessoal/").text
     assert "Não constitui recomendação de investimento" in html and "7 dias" in html
+
+
+# ---------- missão ampla e mesa de oportunidades ----------
+
+IDEA = dict(idea="Planilha personalizada de orçamento para pequenos comércios, vendida sob encomenda", audience="donos de pequenos comércios",
+            how_it_earns="cobrança única no checkout próprio por planilha entregue", effort="baixo", risk="baixo")
+
+
+def test_mission_is_broad_but_bounded(conn):
+    from meridiano.engine import agent, seed
+    import re
+    r = agent.RULES
+    assert "meios legítimos de gerar dinheiro real" in r and "testá-los rápido" in r
+    for exemplo in ("serviços sob encomenda", "micro-ferramentas e calculadoras", "newsletters e assinaturas", "dados públicos organizados", "automações para pequenos negócios", "não é lista fechada"):
+        assert exemplo in r, exemplo
+    for limite in ("LGPD", "sem golpe", "sem falsa promessa de ganho", "sem criar contas nem assumir identidade de terceiros", "sem dado pessoal", "ask_owner"):
+        assert limite in r, limite
+    assert not re.search(r"hotmart|kiwify|eduzz|mercado livre|marketplace|publique|cnpj", r, re.I)
+
+
+def test_opportunity_rules_and_single_owner_request(conn):
+    from meridiano.engine import tools
+    ceo = _ceo(conn)
+    out = tools.run_tool(conn, ceo, "propose_opportunity", dict(IDEA, needs_owner="aceitar os termos do serviço de envio de arquivos"))
+    assert "registrada" in out and "mínimo 5" in out
+    assert "já existe" in tools.run_tool(conn, ceo, "propose_opportunity", dict(IDEA, idea="planilha personalizada de orçamento para pequenos comércios vendida sob encomenda"))
+    assert tools.run_tool(conn, ceo, "propose_opportunity", dict(IDEA, idea="x")).startswith("erro: descreva")
+    for ruim in ("Disparo em massa de mensagens para uma lista de contatos comprada", "Criar perfil falso para vender cursos", "Esquema de pirâmide com indicações"):
+        assert tools.run_tool(conn, ceo, "propose_opportunity", dict(IDEA, idea=ruim)).startswith("erro: ideia recusada"), ruim
+    assert conn.execute("SELECT COUNT(*) AS n FROM opportunities").fetchone()["n"] == 1
+    # descartar exige aprendizado; teste limitado a 2 ao mesmo tempo
+    ids = [1]
+    for i, idea in enumerate(["Calculadora web de reajuste de aluguel pelos índices oficiais", "Newsletter semanal com resumo de editais públicos abertos", "Relatório de pesquisa de mercado sob encomenda para microempresas"]):
+        tools.run_tool(conn, ceo, "propose_opportunity", dict(IDEA, idea=idea, needs_owner=""))
+        ids.append(conn.execute("SELECT MAX(id) AS i FROM opportunities").fetchone()["i"])
+    assert tools.run_tool(conn, ceo, "update_opportunity", {"id": ids[0], "status": "descartada", "learning": "curto"}).startswith("erro: para descartar")
+    assert "agora está 'teste'" in tools.run_tool(conn, ceo, "update_opportunity", {"id": ids[0], "status": "teste", "learning": "vai ao ar na loja"})
+    assert "agora está 'teste'" in tools.run_tool(conn, ceo, "update_opportunity", {"id": ids[1], "status": "teste", "learning": "página de calculadora"})
+    assert tools.run_tool(conn, ceo, "update_opportunity", {"id": ids[2], "status": "teste", "learning": "terceiro"}).startswith("erro: já há 2 testes")
+    # só UM pedido ao dono, quando a ideia que depende dele avança
+    reqs = [r["body"] for r in conn.execute("SELECT body FROM owner_requests").fetchall()]
+    assert len(reqs) == 1 and "aceitar os termos" in reqs[0]
+    tools.run_tool(conn, ceo, "update_opportunity", {"id": ids[0], "status": "ativa", "learning": "primeiras visitas"})
+    assert conn.execute("SELECT COUNT(*) AS n FROM owner_requests").fetchone()["n"] == 1
+    assert "agora está 'descartada'" in tools.run_tool(conn, ceo, "update_opportunity", {"id": ids[1], "status": "descartada", "learning": "sem nenhuma visita medida em 3 dias; descartada"})
+    assert conn.execute("SELECT decided_at IS NOT NULL AS d FROM opportunities WHERE id=%s", (ids[1],)).fetchone()["d"]
+    assert "agora está 'teste'" in tools.run_tool(conn, ceo, "update_opportunity", {"id": ids[2], "status": "teste", "learning": "agora cabe"})
+    assert tools.run_tool(conn, ceo, "update_opportunity", {"id": 9999, "status": "teste", "learning": "x"}).startswith("erro: oportunidade não existe")
+    assert "metrics" not in tools.SPECS[[s["name"] for s in tools.SPECS].index("update_opportunity")]["parameters"]["properties"]   # agente não escreve medições
+
+
+def test_prompt_keeps_five_ideas_and_limits_tests(conn):
+    from meridiano.engine import agent, tools
+    ceo = _ceo(conn)
+    p = agent.build_prompt(conn, ceo)
+    assert "MESA DE OPORTUNIDADES" in p and "(vazia)" in p and "mantenha no mínimo 5" in p
+    for i, idea in enumerate(["Calculadora web de reajuste de aluguel pelos índices oficiais", "Newsletter semanal com resumo de editais públicos abertos",
+                              "Relatório de pesquisa de mercado sob encomenda para microempresas", "Tradução técnica de manuais curtos sob encomenda",
+                              "Análise de currículo com checklist objetivo sob encomenda"]):
+        tools.run_tool(conn, ceo, "propose_opportunity", dict(IDEA, idea=idea))
+    p = agent.build_prompt(conn, ceo)
+    assert "mantenha no mínimo" not in p and "escolha a ideia de menor esforço" in p
+    conn.execute("UPDATE opportunities SET status='teste' WHERE id IN (1,2)")
+    p = agent.build_prompt(conn, ceo)
+    assert "escolha a ideia de menor esforço" not in p and "Descarte rápido" in p and "dado real" in p
+
+
+def test_api_lists_opportunities_with_status_order(conn, monkeypatch):
+    from meridiano.engine import tools
+    c = _client(conn, monkeypatch)
+    ceo = _ceo(conn)
+    for idea in ("Calculadora web de reajuste de aluguel pelos índices oficiais", "Newsletter semanal com resumo de editais públicos abertos"):
+        tools.run_tool(conn, ceo, "propose_opportunity", dict(IDEA, idea=idea))
+    tools.run_tool(conn, ceo, "update_opportunity", {"id": 2, "status": "teste", "learning": "no ar"})
+    r = c.get("/api/opportunities", headers={"X-Token": "leitura"}).json()
+    assert [o["status"] for o in r] == ["teste", "ideia"] and r[0]["autor"] == "Rafael" and r[0]["metrics"] == "{}"
+    assert c.get("/api/opportunities").status_code == 401
