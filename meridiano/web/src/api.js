@@ -11,3 +11,15 @@ export async function post(path) {
   if (!r.ok) throw new Error(String(r.status));
   return r.json();
 }
+// Envia o token do Mercado Pago. O token de admin e o do Mercado Pago ficam só na memória desta chamada: nada é guardado no navegador.
+export async function sendMpToken(adminToken, accessToken) {
+  const r = await fetch('api/secrets/mp-token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Admin-Token': adminToken },
+    body: JSON.stringify({ access_token: accessToken }),
+  });
+  let j = {};
+  try { j = await r.json(); } catch {}
+  if (!r.ok) throw new Error(r.status === 401 ? 'Token de administrador inválido.' : (j.detail || 'Não foi possível enviar.'));
+  return j;
+}
