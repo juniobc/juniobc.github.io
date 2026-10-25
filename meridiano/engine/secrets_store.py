@@ -19,6 +19,7 @@ TOKEN_REQUEST = "Preciso do access token do Mercado Pago (Credenciais de produç
 TOKEN_FILE = "mp-token"
 LEGACY_FILE = "mp_access_token"     # nome usado na primeira versão do painel
 META_FILE = "mp-meta.json"
+WEBHOOK_FILE = "mp-webhook-secret"   # opcional: "Assinatura secreta" do webhook (Suas integrações > Webhooks)
 STORE_FILE = "store.json"           # {"seller_name": "...", "contact_email": "..."}: identificação do vendedor, pelo caminho (b)
 REVERIFY_SECONDS = 60
 
@@ -62,6 +63,16 @@ def _parse(text):
     return line.strip("'\"").strip()
 
 
+def webhook_secret():
+    """Assinatura secreta do webhook do Mercado Pago, se o administrador configurou (arquivo mp-webhook-secret). None se não há."""
+    try:
+        with open(_path(WEBHOOK_FILE), encoding="utf-8") as f:
+            v = _parse(f.read())
+        return v if len(v) >= 16 else None
+    except OSError:
+        return None
+
+
 def read_token():
     """Só para o código de pagamento do servidor (próximas etapas). Nunca expor por API ou ferramenta."""
     p = _token_file()
@@ -101,7 +112,7 @@ def ensure_private():
         if os.path.isdir(config.SECRETS_DIR):
             if os.stat(config.SECRETS_DIR).st_mode & 0o077:
                 os.chmod(config.SECRETS_DIR, 0o700)
-            for n in (TOKEN_FILE, LEGACY_FILE, META_FILE, STORE_FILE):
+            for n in (TOKEN_FILE, LEGACY_FILE, META_FILE, STORE_FILE, WEBHOOK_FILE):
                 p = _path(n)
                 if os.path.isfile(p) and os.stat(p).st_mode & 0o077:
                     os.chmod(p, 0o600)
@@ -205,10 +216,10 @@ def status():
     prob = problem()
     if not configured():
         return {"configurado": False, "modo": None, "verificado": False, "verificado_em": None, "detalhe": None, "problema": prob,
-                "permissoes_ok": ensure_private(), "atualizado_em": None}
+                "permissoes_ok": ensure_private(), "atualizado_em": None, "webhook_assinado": webhook_secret() is not None}
     m = _read_meta()
     return {"configurado": True, "modo": m.get("modo") or ("teste" if read_token().startswith("TEST-") else "producao"), "verificado": bool(m.get("verificado")),
-            "verificado_em": m.get("verificado_em"), "detalhe": m.get("detalhe"), "problema": None, "permissoes_ok": ensure_private(), "atualizado_em": m.get("atualizado_em")}
+            "verificado_em": m.get("verificado_em"), "detalhe": m.get("detalhe"), "problema": None, "permissoes_ok": ensure_private(), "atualizado_em": m.get("atualizado_em"), "webhook_assinado": webhook_secret() is not None}
 
 
 def import_store_file(conn):

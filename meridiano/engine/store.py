@@ -76,13 +76,19 @@ def published(conn):
     return rows
 
 
+# O botão de compra só liga quando o cliente consegue RECEBER o produto depois de pagar. A entrega por link (próxima etapa)
+# vira esta chave para True; até lá ninguém paga e fica sem receber.
+DELIVERY_READY = False
+
+
 def checkout_available(conn):
-    """Será verdadeiro quando o checkout do Mercado Pago existir (etapa 3). Enquanto isso, a página não vende."""
-    return False
+    from . import secrets_store
+    return DELIVERY_READY and secrets_store.configured()
 
 
-def _page(title, body, nonce, desc=""):
-    return (f'<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+def _page(title, body, nonce, desc="", refresh=0):
+    meta = f'<meta http-equiv="refresh" content="{int(refresh)}">' if refresh else ""
+    return (f'<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{meta}'
             f'<title>{html.escape(title)}</title><meta name="description" content="{html.escape(desc[:160], quote=True)}">'
             f'<style nonce="{nonce}">{CSS}</style></head><body><main>{body}</main></body></html>')
 
@@ -137,3 +143,26 @@ def render_index(conn, nonce):
 def render_soon(nonce):
     return _page("Pagamento em breve", "<h1>Pagamento em breve</h1><p>O pagamento online ainda não está disponível. Volte em breve.</p>"
                  '<p><a href="/pub/loja/">Voltar à loja</a></p>', nonce)
+
+
+ORDER_TEXT = {
+    "criado": ("Pedido criado", "Estamos abrindo o pagamento. Se a página do Mercado Pago não abriu, volte à loja e tente de novo."),
+    "aguardando": ("Aguardando o pagamento", "Assim que o Mercado Pago confirmar, esta página mostra o seu acesso. Ela se atualiza sozinha."),
+    "pago": ("Pagamento confirmado", "Obrigado pela compra!"),
+    "recusado": ("O pagamento não foi aprovado", "Nada foi cobrado. Você pode tentar de novo pela loja, com outro meio de pagamento."),
+    "cancelado": ("Pedido cancelado", "Nada foi cobrado."),
+    "reembolsado": ("Pagamento reembolsado", "O valor foi devolvido e o acesso ao material foi encerrado."),
+    "chargeback": ("Pagamento contestado", "O pagamento foi contestado junto ao banco ou à operadora e o acesso ao material foi encerrado."),
+}
+
+
+def render_order(conn, token, nonce, delivery_html=""):
+    """Página do pedido: só o estado, sem nenhum dado pessoal. O token do pedido é o segredo de quem comprou."""
+    o = conn.execute("SELECT o.status,o.amount_cents,p.name FROM orders o JOIN products p ON p.id=o.product_id WHERE o.token=%s", (token,)).fetchone()
+    if not o:
+        return None
+    titulo, texto = ORDER_TEXT[o["status"]]
+    e = html.escape
+    body = (f'<p><a href="/pub/loja/">Loja</a></p><h1>{e(titulo)}</h1><p>{e(o["name"])} · {brl(o["amount_cents"])}</p><p>{e(texto)}</p>'
+            + (delivery_html if o["status"] == "pago" else ""))
+    return _page(titulo, body, nonce, refresh=15 if o["status"] in ("criado", "aguardando") else 0)

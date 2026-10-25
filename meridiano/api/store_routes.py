@@ -37,13 +37,6 @@ def loja_produto(slug: str):
     return _html(page, n)
 
 
-@router.post("/pub/loja/{slug}/comprar", response_class=HTMLResponse)
-def loja_comprar(slug: str):
-    """Etapa 3 troca isto pelo checkout do Mercado Pago. Até lá, ninguém é cobrado."""
-    n = store.new_nonce()
-    return _html(store.render_soon(n), n, 503)
-
-
 class Settings(BaseModel):
     seller_name: str = Field(min_length=3, max_length=120)
     contact_email: str = Field(min_length=6, max_length=190)

@@ -140,7 +140,7 @@ def test_migrations_idempotent_and_clean_old_empty_usage(url, monkeypatch):
     c.execute("INSERT INTO employees(slug,name,role,area,instructions,model) VALUES ('a','A','CEO','D','x','m'),('b','B','CEO','D','x','m')")
     c.execute("INSERT INTO usage_log(employee_id,model,prompt_tokens,completion_tokens) SELECT id,'m',100,3500 FROM employees, generate_series(1,2)")
     c.execute("INSERT INTO messages(from_id,body) SELECT id,'oi' FROM employees WHERE slug='b'")
-    assert migrate.migrate(c) == ["002_zera_uso_vazio.sql", "003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql", "010_loja.sql", "011_oportunidades.sql", "012_equipe_paralelo.sql"]
+    assert migrate.migrate(c) == ["002_zera_uso_vazio.sql", "003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql", "010_loja.sql", "011_oportunidades.sql", "012_equipe_paralelo.sql", "013_pedidos.sql"]
     assert migrate.migrate(c) == []
     ok = c.execute("SELECT e.slug FROM usage_log u JOIN employees e ON e.id=u.employee_id WHERE u.ok GROUP BY 1").fetchall()
     assert [r["slug"] for r in ok] == ["b"]  # b tem mensagem gravada: chamadas dele eram úteis
@@ -214,7 +214,7 @@ def test_migration_003_cleans_duplicates(url, monkeypatch):
         c.execute("INSERT INTO products(name,file_path) VALUES ('Toolkit X','a.txt')")
         c.execute("INSERT INTO tasks(title) VALUES ('Pesquisar copy')")
     c.execute("INSERT INTO tasks(title,details) VALUES ('Receber fontes','mandar os arquivos .txt fonte')")
-    assert migrate.migrate(c) == ["003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql", "010_loja.sql", "011_oportunidades.sql", "012_equipe_paralelo.sql"]
+    assert migrate.migrate(c) == ["003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql", "010_loja.sql", "011_oportunidades.sql", "012_equipe_paralelo.sql", "013_pedidos.sql"]
     assert c.execute("SELECT COUNT(*) AS n FROM products").fetchone()["n"] == 1
     assert c.execute("SELECT COUNT(*) AS n FROM tasks WHERE status='open'").fetchone()["n"] == 1
 
@@ -403,7 +403,7 @@ def test_migration_006_archives_existing_messages(url, monkeypatch):
     for f in files[:5]:
         c.execute(f.read_text()); c.execute("INSERT INTO schema_migrations(name) VALUES (%s)", (f.name,))
     c.execute("INSERT INTO messages(body) VALUES ('velha 1'),('velha 2')")
-    assert migrate.migrate(c) == ["006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql", "010_loja.sql", "011_oportunidades.sql", "012_equipe_paralelo.sql"]
+    assert migrate.migrate(c) == ["006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql", "010_loja.sql", "011_oportunidades.sql", "012_equipe_paralelo.sql", "013_pedidos.sql"]
     c.execute("INSERT INTO messages(body) VALUES ('nova')")
     assert [r["body"] for r in c.execute("SELECT body FROM messages WHERE NOT archived").fetchall()] == ["nova"]
 
@@ -747,7 +747,7 @@ def test_migration_009_supersedes_old_owner_requests(url, monkeypatch):
         c.execute(f.read_text()); c.execute("INSERT INTO schema_migrations(name) VALUES (%s)", (f.name,))
     c.execute("INSERT INTO owner_requests(body) VALUES ('Produto Toolkit pronto, preciso que o Junio publique no marketplace'),('Abrir conta na Hotmart com CPF')")
     c.execute("INSERT INTO owner_requests(body,done) VALUES ('antigo já feito',true)")
-    assert migrate.migrate(c) == ["009_vendas_no_servidor.sql", "010_loja.sql", "011_oportunidades.sql", "012_equipe_paralelo.sql"]
+    assert migrate.migrate(c) == ["009_vendas_no_servidor.sql", "010_loja.sql", "011_oportunidades.sql", "012_equipe_paralelo.sql", "013_pedidos.sql"]
     rows = c.execute("SELECT done,resolution FROM owner_requests ORDER BY id").fetchall()
     assert all(r["done"] for r in rows)
     assert [r["resolution"] for r in rows[:2]] == ["substituído: as vendas passam a ser feitas no próprio servidor, com Mercado Pago"] * 2
@@ -923,6 +923,7 @@ def test_store_page_is_static_escaped_and_locked_down(conn, monkeypatch):
     assert "Pagamento em breve" in html and "<form" not in html and "Comprar" not in html
     assert "script" not in html.split("</style>")[1].lower().replace("&lt;script&gt;alert(1)&lt;/script&gt;", "")
     assert c.post("/pub/loja/copy-de-vendas/comprar").status_code == 503                                  # ninguém é cobrado
+    assert conn.execute("SELECT COUNT(*) AS n FROM orders").fetchone()["n"] == 0
 
 
 def test_store_publishes_only_when_everything_is_ready(conn, monkeypatch):
@@ -1376,3 +1377,319 @@ def test_housekeeping_publishes_parallel_status_to_the_panel(conn, monkeypatch):
     r = TestClient(main.app).get("/api/engine", headers={"X-Token": "t"}).json()
     assert r["vivo"] and r["trabalhadores"] == 3 and r["turnos_rodando"] == 1 and r["funcionarios_da_vez"] == [me["name"]]
     assert r["equipe"] == {"funcionarios": 2, "meta": 6, "tarefas_abertas": 0, "proxima_revisao_em_turnos": 30}
+
+
+# ---------- pagamentos com Mercado Pago (simulados: nenhuma chamada real) ----------
+
+import re as _re
+import hmac as _hmac
+import hashlib as _hashlib
+
+
+class FakeMP:
+    def __init__(self):
+        self.payments, self.calls = {}, []
+        self.pref = (201, {"id": "PREF1", "init_point": "https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=PREF1",
+                           "sandbox_init_point": "https://sandbox.mercadopago.com.br/checkout/v1/redirect?pref_id=PREF1"})
+
+    def __call__(self, method, path, token, json_body=None, idem=None):
+        self.calls.append((method, path, token, json_body, idem))
+        if method == "POST" and path == "/checkout/preferences":
+            return self.pref
+        m = _re.fullmatch(r"/v1/payments/(\d+)", path)
+        if method == "GET" and m:
+            p = self.payments.get(m.group(1))
+            return (200, p) if p else (404, {"message": "not found"})
+        raise AssertionError((method, path))
+
+
+def mp_payment(pid, order_id, amount=29.9, status="approved", fee=1.5, **extra):
+    p = {"id": int(pid), "status": status, "transaction_amount": amount, "currency_id": "BRL", "external_reference": str(order_id),
+         "fee_details": [{"type": "mercadopago_fee", "amount": fee, "fee_payer": "collector"}] if fee is not None else [],
+         "live_mode": True, "payer": {"email": "comprador.secreto@example.com", "first_name": "Fulano"}}
+    p.update(extra)
+    return p
+
+
+@pytest.fixture()
+def shop(conn, tmp_path, monkeypatch):
+    from meridiano.engine import config, secrets_store as ss, payments, store
+    monkeypatch.setattr(config, "SECRETS_DIR", str(tmp_path / "segredos"))
+    (tmp_path / "segredos").mkdir(mode=0o700)
+    (tmp_path / "segredos" / "mp-token").write_text(TOKEN)
+    monkeypatch.setattr(ss, "_state", {"fp": None, "last": 0.0})
+    monkeypatch.setattr(ss, "verify", lambda t: ("ok", "token aceito pelo Mercado Pago"))
+    fake = FakeMP()
+    monkeypatch.setattr(payments, "mp_request", fake)
+    c = _client(conn, monkeypatch)
+    _open_store(conn)
+    class S: pass
+    s = S()
+    s.fake, s.client, s.secdir = fake, c, tmp_path / "segredos"
+    s.product = store.published(conn)[0]
+    s.order = lambda: payments.create_order(conn, s.product)
+    s.pay = lambda order, pid="1001", **kw: fake.payments.__setitem__(str(pid), mp_payment(pid, order["id"], **kw))
+    s.webhook = lambda pid="1001", **kw: c.post(f"/api/mp/webhook?data.id={pid}&type=payment", json={"type": "payment", "data": {"id": str(pid)}}, **kw)
+    return s
+
+
+def _ledger(conn):
+    return [(r["kind"], r["amount_cents"], r["external_ref"]) for r in conn.execute("SELECT kind,amount_cents,external_ref FROM ledger ORDER BY id").fetchall()]
+
+
+def test_signature_matches_the_mercado_pago_manifest():
+    from meridiano.engine import payments
+    secret = "segredo-do-webhook-123456"
+    manifest = "id:123456;request-id:abc-req-1;ts:1704908010;"
+    v1 = _hmac.new(secret.encode(), manifest.encode(), _hashlib.sha256).hexdigest()
+    hdr = f"ts=1704908010,v1={v1}"
+    assert payments.signature_ok(secret, "123456", "abc-req-1", hdr)
+    assert payments.signature_ok(secret, "123456", "abc-req-1", " ts=1704908010 , v1=" + v1)
+    for bad in (dict(data_id="123457"), dict(request_id="outro"), dict(header=f"ts=1704908011,v1={v1}"), dict(header="v1=" + v1), dict(header=f"ts=1704908010,v1={'0' * 64}"), dict(header=""), dict(secret="outro-segredo-123456")):
+        args = dict(secret=secret, data_id="123456", request_id="abc-req-1", header=hdr); args.update(bad)
+        assert not payments.signature_ok(args["secret"], args["data_id"], args["request_id"], args["header"]), bad
+    m2 = "id:123456;ts:1704908010;"                                               # sem x-request-id: a parte é omitida
+    assert payments.signature_ok(secret, "123456", None, "ts=1704908010,v1=" + _hmac.new(secret.encode(), m2.encode(), _hashlib.sha256).hexdigest())
+
+
+def test_confirmed_payment_becomes_a_sale_with_fee_and_net(conn, shop):
+    o = shop.order(); shop.pay(o, "1001", amount=29.9, fee=1.5)
+    r = shop.webhook("1001")
+    assert r.status_code == 200 and r.json() == {"ok": True, "resultado": "venda"}
+    row = conn.execute("SELECT status,payment_id,gross_cents,fee_cents,net_cents,test FROM orders WHERE id=%s", (o["id"],)).fetchone()
+    assert row == {"status": "pago", "payment_id": "1001", "gross_cents": 2990, "fee_cents": 150, "net_cents": 2840, "test": False}
+    assert _ledger(conn) == [("receita", 2990, "mp:1001"), ("despesa", 150, "mp:1001:taxa")]
+    from meridiano.engine import db
+    assert db.cash_cents(conn) == 2840
+    st = shop.client.get("/api/state", headers={"X-Token": "leitura"}).json()
+    assert st["caixa"] == 28.4 and st["vendas"] == 1
+    ev = conn.execute("SELECT outcome FROM payment_events").fetchall()
+    assert [e["outcome"] for e in ev] == ["venda"]
+
+
+def test_same_notification_many_times_is_one_sale(conn, shop):
+    o = shop.order(); shop.pay(o, "1001")
+    outs = [shop.webhook("1001").json()["resultado"] for _ in range(4)]
+    assert outs == ["venda", "ja_processado", "ja_processado", "ja_processado"]
+    assert len(_ledger(conn)) == 2 and conn.execute("SELECT COUNT(*) AS n FROM payment_events").fetchone()["n"] == 1
+
+
+def test_parallel_notifications_do_not_double_count(conn, shop, url):
+    from meridiano.engine import payments, db
+    o = shop.order(); shop.pay(o, "1001")
+    conns = [db.connect() for _ in range(6)]
+    res = []
+    _threads(6, lambda i: res.append(payments.process_payment(conns[i], "1001")["outcome"]))
+    assert sorted(res).count("venda") == 1 and set(res) <= {"venda", "ja_processado"}
+    assert len(_ledger(conn)) == 2
+
+
+def test_forged_or_wrong_notifications_never_create_a_sale(conn, shop):
+    o = shop.order()
+    assert shop.webhook("999999").status_code == 502                                     # MP não conhece: erro (MP tenta de novo), nada muda
+    shop.pay(o, "1001", status="pending")
+    assert shop.webhook("1001").json()["resultado"] == "pendente"
+    assert conn.execute("SELECT status FROM orders").fetchone()["status"] == "aguardando"
+    shop.pay(o, "1002", amount=1.0)                                                      # valor diferente do pedido
+    assert shop.webhook("1002").json()["resultado"] == "valor_divergente"
+    shop.pay(o, "1003", currency_id="USD")
+    assert shop.webhook("1003").json()["resultado"] == "valor_divergente"
+    fake_o = {"id": 987654}
+    shop.pay(fake_o, "1004")                                                             # pedido que não é nosso
+    assert shop.webhook("1004").json()["resultado"] == "sem_pedido"
+    shop.pay(o, "1005", status="rejected")
+    assert shop.webhook("1005").json()["resultado"] == "recusado"
+    assert conn.execute("SELECT status FROM orders").fetchone()["status"] == "recusado"
+    assert _ledger(conn) == [] and conn.execute("SELECT COUNT(*) AS n FROM orders WHERE status='pago'").fetchone()["n"] == 0
+    # um pedido pago nunca é derrubado por um aviso posterior de recusa
+    shop.pay(o, "1006"); assert shop.webhook("1006").json()["resultado"] == "venda"
+    shop.pay(o, "1007", status="rejected"); shop.webhook("1007")
+    assert conn.execute("SELECT status FROM orders").fetchone()["status"] == "pago"
+    # o conteúdo do aviso não é confiável: valores falsos no corpo não mudam nada
+    r = shop.client.post("/api/mp/webhook?data.id=1002&type=payment", json={"type": "payment", "data": {"id": "1002"}, "status": "approved", "transaction_amount": 29.9})
+    assert r.json()["resultado"] == "valor_divergente"
+
+
+def test_webhook_signature_is_required_once_the_secret_exists(conn, shop):
+    o = shop.order(); shop.pay(o, "1001")
+    shop.fake.calls.clear()
+    (shop.secdir / "mp-webhook-secret").write_text("segredo-do-webhook-123456\n")
+    r = shop.webhook("1001")
+    assert r.status_code == 401 and shop.fake.calls == [] and _ledger(conn) == []                                  # nem consulta o MP
+    ts = "1704908010"
+    sig = _hmac.new(b"segredo-do-webhook-123456", f"id:1001;request-id:req-9;ts:{ts};".encode(), _hashlib.sha256).hexdigest()
+    bad = shop.client.post("/api/mp/webhook?data.id=1001&type=payment", json={}, headers={"x-signature": f"ts={ts},v1={'a' * 64}", "x-request-id": "req-9"})
+    assert bad.status_code == 401
+    ok = shop.client.post("/api/mp/webhook?data.id=1001&type=payment", json={}, headers={"x-signature": f"ts={ts},v1={sig}", "x-request-id": "req-9"})
+    assert ok.status_code == 200 and ok.json()["resultado"] == "venda"
+    assert shop.client.get("/api/secrets/mp-token", headers={"X-Token": "leitura"}).json()["webhook_assinado"] is True
+
+
+def test_webhook_ignores_other_event_types_and_requires_an_id(shop):
+    assert shop.client.post("/api/mp/webhook?type=merchant_order&data.id=5", json={}).json() == {"ok": True, "ignorado": "merchant_order"}
+    assert shop.client.post("/api/mp/webhook?type=payment", json={}).status_code == 400
+    assert shop.client.post("/api/mp/webhook", json={"type": "payment", "data": {"id": "abc"}}).status_code == 502      # id inválido nunca chega a ser pedido ao MP
+    assert shop.fake.calls == []
+
+
+def test_test_mode_payments_never_reach_the_cash_book(conn, shop):
+    o = shop.order(); shop.pay(o, "1001", live_mode=False)
+    assert shop.webhook("1001").json()["resultado"] == "venda_teste"
+    assert conn.execute("SELECT status,test FROM orders").fetchone() == {"status": "pago", "test": True}
+    assert _ledger(conn) == []
+    assert shop.client.get("/api/state", headers={"X-Token": "leitura"}).json()["caixa"] == 0
+
+
+def test_missing_fee_means_net_equals_gross_and_no_fee_entry(conn, shop):
+    o = shop.order(); shop.pay(o, "1001", fee=None)
+    shop.webhook("1001")
+    assert conn.execute("SELECT fee_cents,net_cents FROM orders").fetchone() == {"fee_cents": None, "net_cents": 2990}
+    assert _ledger(conn) == [("receita", 2990, "mp:1001")]
+
+
+def test_refund_and_chargeback_reverse_the_sale_once(conn, shop):
+    from meridiano.engine import db
+    o = shop.order(); shop.pay(o, "1001")
+    shop.webhook("1001")
+    shop.pay(o, "1001", status="refunded")
+    outs = [shop.webhook("1001").json()["resultado"] for _ in range(3)]
+    assert outs == ["reembolso", "ja_processado", "ja_processado"]
+    assert conn.execute("SELECT status,refunded_cents FROM orders").fetchone() == {"status": "reembolsado", "refunded_cents": 2990}
+    assert _ledger(conn) == [("receita", 2990, "mp:1001"), ("despesa", 150, "mp:1001:taxa"), ("despesa", 2990, "mp:1001:reembolso")]
+    assert db.cash_cents(conn) == -150                                                 # a taxa do MP não volta sozinha
+    assert shop.client.get("/api/state", headers={"X-Token": "leitura"}).json()["vendas"] == 0
+    o2 = shop.order(); shop.pay(o2, "2001"); shop.webhook("2001")
+    shop.pay(o2, "2001", status="charged_back"); r = shop.webhook("2001")
+    assert r.json()["resultado"] == "chargeback" and conn.execute("SELECT status FROM orders WHERE id=%s", (o2["id"],)).fetchone()["status"] == "chargeback"
+    assert ("despesa", 2990, "mp:2001:chargeback") in _ledger(conn)
+
+
+def test_partial_refund_keeps_the_sale_and_records_the_money_back(conn, shop):
+    o = shop.order(); shop.pay(o, "1001"); shop.webhook("1001")
+    shop.pay(o, "1001", transaction_amount_refunded=10.0)
+    assert shop.webhook("1001").json()["resultado"] == "reembolso_parcial"
+    assert shop.webhook("1001").json()["resultado"] == "ja_processado"
+    assert conn.execute("SELECT status,refunded_cents FROM orders").fetchone() == {"status": "pago", "refunded_cents": 1000}
+    assert [x for x in _ledger(conn) if "parcial" in x[2]] == [("despesa", 1000, "mp:1001:reembolso-parcial-1000")]
+    # segundo reembolso parcial (cumulativo 15,00): só a diferença (5,00) é lançada; depois o reembolso total completa o resto
+    shop.pay(o, "1001", transaction_amount_refunded=15.0); shop.webhook("1001")
+    assert ("despesa", 500, "mp:1001:reembolso-parcial-1500") in _ledger(conn)
+    shop.pay(o, "1001", status="refunded", transaction_amount_refunded=29.9); shop.webhook("1001")
+    assert ("despesa", 1490, "mp:1001:reembolso") in _ledger(conn)                           # 29,90 - 15,00 já devolvidos
+    from meridiano.engine import db
+    assert sum(a for k, a, r in _ledger(conn) if k == "despesa" and "reembolso" in r) == 2990   # devolveu exatamente o que recebeu, nunca mais
+    assert db.cash_cents(conn) == -150 and conn.execute("SELECT status,refunded_cents FROM orders").fetchone() == {"status": "reembolsado", "refunded_cents": 2990}
+
+
+def test_out_of_order_notifications_still_book_sale_and_refund(conn, shop):
+    from meridiano.engine import db
+    o = shop.order(); shop.pay(o, "1001", status="refunded", transaction_amount_refunded=29.9)      # o aviso de reembolso chega ANTES do de aprovação
+    assert shop.webhook("1001").json()["resultado"] == "reembolso"
+    assert _ledger(conn) == [("receita", 2990, "mp:1001"), ("despesa", 150, "mp:1001:taxa"), ("despesa", 2990, "mp:1001:reembolso")]
+    assert db.cash_cents(conn) == -150
+    shop.pay(o, "1001", status="approved")                                                          # o aviso atrasado de aprovação não desfaz nada nem duplica
+    assert shop.webhook("1001").json()["resultado"] in ("ja_processado",)
+    assert len(_ledger(conn)) == 3 and conn.execute("SELECT status FROM orders").fetchone()["status"] == "reembolsado"
+    o2 = shop.order(); shop.pay(o2, "2001", transaction_amount_refunded=10.0)                        # aprovado já com reembolso parcial, primeira vez que vemos
+    assert shop.webhook("2001").json()["resultado"] == "reembolso_parcial"
+    assert ("receita", 2990, "mp:2001") in _ledger(conn) and ("despesa", 1000, "mp:2001:reembolso-parcial-1000") in _ledger(conn)
+
+
+def test_second_payment_for_the_same_order_is_flagged_not_hidden(conn, shop):
+    o = shop.order(); shop.pay(o, "1001"); shop.webhook("1001")
+    shop.pay(o, "1002"); r = shop.webhook("1002")
+    assert r.json()["resultado"] == "pagamento_duplicado"
+    assert conn.execute("SELECT payment_id FROM orders").fetchone()["payment_id"] == "1001"          # o pedido continua ligado ao primeiro
+    assert ("receita", 2990, "mp:1002") in _ledger(conn)                                              # o dinheiro entrou de verdade
+    assert "reembolso manual" in conn.execute("SELECT note FROM payment_events WHERE outcome='pagamento_duplicado'").fetchone()["note"]
+
+
+def test_checkout_is_off_until_delivery_exists_and_charges_no_one(conn, shop, monkeypatch):
+    from meridiano.engine import store
+    assert store.DELIVERY_READY is False
+    r = shop.client.post("/pub/loja/copy-de-vendas/comprar", follow_redirects=False)
+    assert r.status_code == 503 and conn.execute("SELECT COUNT(*) AS n FROM orders").fetchone()["n"] == 0
+    assert shop.fake.calls == []
+    assert "Comprar" not in shop.client.get("/pub/loja/copy-de-vendas/").text
+
+
+def test_checkout_creates_order_and_preference_and_redirects(conn, shop, monkeypatch):
+    from meridiano.engine import store, config
+    monkeypatch.setattr(store, "DELIVERY_READY", True)
+    page = shop.client.get("/pub/loja/copy-de-vendas/").text
+    assert 'action="/pub/loja/copy-de-vendas/comprar"' in page and "Comprar agora" in page
+    r = shop.client.post("/pub/loja/copy-de-vendas/comprar", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"].startswith("https://www.mercadopago.com.br/checkout/")
+    o = conn.execute("SELECT * FROM orders").fetchone()
+    assert o["status"] == "aguardando" and o["amount_cents"] == 2990 and o["preference_id"] == "PREF1" and len(o["token"]) >= 30
+    method, path, token, body, idem = shop.fake.calls[-1]
+    assert (method, path) == ("POST", "/checkout/preferences") and token == TOKEN and idem == o["token"]
+    assert body["items"] == [{"id": "copy-de-vendas", "title": "Copy de Vendas", "quantity": 1, "currency_id": "BRL", "unit_price": 29.9}]
+    assert body["external_reference"] == str(o["id"]) and body["auto_return"] == "approved"
+    assert body["notification_url"] == config.PUBLIC_BASE_URL + "/api/mp/webhook" and body["back_urls"]["success"] == f"{config.PUBLIC_BASE_URL}/pub/loja/pedido/{o['token']}"
+    # o preço do pedido fica congelado, mesmo se o preço do produto mudar depois
+    conn.execute("UPDATE products SET price_cents=9900")
+    assert conn.execute("SELECT amount_cents FROM orders").fetchone()["amount_cents"] == 2990
+
+
+def test_checkout_failures_are_safe(conn, shop, monkeypatch):
+    from meridiano.engine import store, config
+    monkeypatch.setattr(store, "DELIVERY_READY", True)
+    shop.fake.pref = (500, {})
+    r = shop.client.post("/pub/loja/copy-de-vendas/comprar", follow_redirects=False)
+    assert r.status_code == 502 and "Nada foi cobrado" in r.text and "mercadopago" not in r.text.lower()
+    assert conn.execute("SELECT status FROM orders").fetchone()["status"] == "cancelado"
+    shop.fake.pref = (201, {"id": "P", "init_point": "http://inseguro.example/x"})                    # só redireciona para https
+    assert shop.client.post("/pub/loja/copy-de-vendas/comprar", follow_redirects=False).status_code == 502
+    assert shop.client.post("/pub/loja/nao-existe/comprar", follow_redirects=False).status_code == 404
+    shop.fake.pref = (201, {"id": "P", "init_point": "https://www.mercadopago.com.br/x", "sandbox_init_point": "https://sandbox.mercadopago.com.br/x"})
+    (shop.secdir / "mp-token").write_text("TEST-" + "x1y2z3w4" * 5)                                    # token de teste vai para o sandbox
+    r = shop.client.post("/pub/loja/copy-de-vendas/comprar", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"].startswith("https://sandbox.")
+    assert conn.execute("SELECT test FROM orders ORDER BY id DESC").fetchone()["test"] is True
+    # proteção contra enxurrada de pedidos abertos
+    monkeypatch.setattr(config, "MAX_OPEN_ORDERS", 2)
+    codes = [shop.client.post("/pub/loja/copy-de-vendas/comprar", follow_redirects=False).status_code for _ in range(3)]
+    assert 429 in codes
+
+
+def test_order_page_shows_state_and_confirms_the_return_with_the_mp_api(conn, shop):
+    o = shop.order()
+    conn.execute("UPDATE orders SET status='aguardando' WHERE id=%s", (o["id"],))
+    r = shop.client.get(f"/pub/loja/pedido/{o['token']}")
+    assert r.status_code == 200 and "Aguardando o pagamento" in r.text and 'http-equiv="refresh"' in r.text and "script-src 'none'" in r.headers["content-security-policy"]
+    shop.pay(o, "1001")
+    r = shop.client.get(f"/pub/loja/pedido/{o['token']}?payment_id=1001&status=approved&collection_status=approved")
+    assert "Pagamento confirmado" in r.text and 'http-equiv="refresh"' not in r.text
+    assert conn.execute("SELECT status FROM orders").fetchone()["status"] == "pago" and len(_ledger(conn)) == 2
+    # a URL de retorno sozinha não vende nada: o status na URL é ignorado
+    o2 = shop.order()
+    r = shop.client.get(f"/pub/loja/pedido/{o2['token']}?payment_id=4040&status=approved")
+    assert "Pagamento confirmado" not in r.text and conn.execute("SELECT status FROM orders WHERE id=%s", (o2["id"],)).fetchone()["status"] == "criado"
+    assert shop.client.get("/pub/loja/pedido/token-inexistente-xxxxxxxxxxxxxxxx").status_code == 404
+    assert shop.client.get("/pub/loja/pedido/curto").status_code == 404
+    assert shop.client.get(f"/pub/loja/pedido/{o['token']}?payment_id=1%20OR%201=1").status_code == 200       # id malformado é ignorado
+    conn.execute("UPDATE orders SET status='reembolsado'")
+    assert "reembolsado" in shop.client.get(f"/pub/loja/pedido/{o['token']}").text.lower()
+
+
+def test_no_personal_data_of_the_buyer_is_stored_anywhere(conn, shop):
+    o = shop.order(); shop.pay(o, "1001"); shop.webhook("1001")
+    for t in [r["table_name"] for r in conn.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public'").fetchall()]:
+        dump = str(conn.execute(f'SELECT * FROM "{t}"').fetchall())
+        assert "comprador.secreto" not in dump and "Fulano" not in dump, t
+    cols = {r["column_name"] for r in conn.execute("SELECT column_name FROM information_schema.columns WHERE table_name IN ('orders','payment_events')").fetchall()}
+    assert not any(k in cols for k in ("email", "name", "nome", "cpf", "phone", "payer"))
+
+
+def test_orders_api_needs_token_and_exposes_no_buyer_data(conn, shop):
+    o = shop.order(); shop.pay(o, "1001"); shop.webhook("1001")
+    assert shop.client.get("/api/orders").status_code == 401
+    r = shop.client.get("/api/orders", headers={"X-Token": "leitura"})
+    assert r.status_code == 200 and r.json()[0]["status"] == "pago" and r.json()[0]["net_cents"] == 2840 and "comprador" not in r.text
+
+
+def test_no_agent_tool_can_touch_money_or_orders():
+    from meridiano.engine import tools
+    names = {s["name"] for s in tools.SPECS}
+    assert not any(k in n for n in names for k in ("cash", "ledger", "money", "order", "pedido", "payment", "refund", "sale"))
