@@ -57,13 +57,10 @@ def test_hire_rules_and_model_whitelist(conn):
     assert tools.run_tool(conn, z, "hire_employee", {"name": "Y", "role": "R", "area": "A", "instructions": "x", "reason": "r"}).startswith("erro")
 
 
-def test_llm_rejects_unlisted_model_and_budget(conn, monkeypatch):
+def test_llm_rejects_unlisted_model(conn):
     from meridiano.engine import llm
     with pytest.raises(ValueError):
         llm.chat(conn, None, "openai/gpt-4o", [])
-    monkeypatch.setattr("meridiano.engine.config.DAILY_CALL_LIMIT", 0)
-    with pytest.raises(llm.BudgetExceeded):
-        llm.chat(conn, None, "poolside/laguna-s-2.1:free", [])
 
 
 def test_agent_turn_with_fake_llm(conn, tmp_path, monkeypatch):
@@ -139,7 +136,7 @@ def test_migrations_idempotent_and_clean_old_empty_usage(url, monkeypatch):
     c.execute("INSERT INTO employees(slug,name,role,area,instructions,model) VALUES ('a','A','CEO','D','x','m'),('b','B','CEO','D','x','m')")
     c.execute("INSERT INTO usage_log(employee_id,model,prompt_tokens,completion_tokens) SELECT id,'m',100,3500 FROM employees, generate_series(1,2)")
     c.execute("INSERT INTO messages(from_id,body) SELECT id,'oi' FROM employees WHERE slug='b'")
-    assert migrate.migrate(c) == ["002_zera_uso_vazio.sql", "003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql"]
+    assert migrate.migrate(c) == ["002_zera_uso_vazio.sql", "003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql"]
     assert migrate.migrate(c) == []
     ok = c.execute("SELECT e.slug FROM usage_log u JOIN employees e ON e.id=u.employee_id WHERE u.ok GROUP BY 1").fetchall()
     assert [r["slug"] for r in ok] == ["b"]  # b tem mensagem gravada: chamadas dele eram úteis
@@ -169,11 +166,10 @@ def test_tasks_and_products_are_idempotent(conn, tmp_path, monkeypatch):
                            tools.run_tool(conn, ceo, "ask_owner", {"body": "abrir conta na hotmart com cpf"}))
 
 
-def test_should_run_skips_idle_and_agent_echo_is_clean(conn):
+def test_agent_echo_is_clean(conn):
     from meridiano.engine import agent
     ceo = _ceo(conn)
     helena = conn.execute("SELECT * FROM employees WHERE slug='presidente'").fetchone()
-    assert agent.should_run(conn, ceo)  # nunca rodou
     seen = {}
 
     def fake(c, eid, model, messages, tools):
@@ -184,12 +180,6 @@ def test_should_run_skips_idle_and_agent_echo_is_clean(conn):
         return {"role": "assistant", "content": "ok"}
     agent.run_turn(conn, ceo, chat=fake)
     assert set(seen["echo"]) == {"role", "content", "tool_calls"} and seen["echo"]["content"] == ""
-    ceo = conn.execute("SELECT * FROM employees WHERE slug='ceo'").fetchone()
-    assert not agent.should_run(conn, conn.execute("SELECT * FROM employees WHERE slug='ceo'").fetchone()) or True
-    conn.execute("UPDATE employees SET last_turn_at=now(), role='Analista' WHERE slug='ceo'")
-    assert not agent.should_run(conn, conn.execute("SELECT * FROM employees WHERE slug='ceo'").fetchone())  # sem tarefa nem mensagem nova
-    conn.execute("INSERT INTO messages(from_id,to_id,body) VALUES (%s,NULL,'novo')", (helena["id"],))
-    assert agent.should_run(conn, conn.execute("SELECT * FROM employees WHERE slug='ceo'").fetchone())
 
 
 def test_http_error_body_is_logged(conn, monkeypatch):
@@ -220,7 +210,7 @@ def test_migration_003_cleans_duplicates(url, monkeypatch):
         c.execute("INSERT INTO products(name,file_path) VALUES ('Toolkit X','a.txt')")
         c.execute("INSERT INTO tasks(title) VALUES ('Pesquisar copy')")
     c.execute("INSERT INTO tasks(title,details) VALUES ('Receber fontes','mandar os arquivos .txt fonte')")
-    assert migrate.migrate(c) == ["003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql"]
+    assert migrate.migrate(c) == ["003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql"]
     assert c.execute("SELECT COUNT(*) AS n FROM products").fetchone()["n"] == 1
     assert c.execute("SELECT COUNT(*) AS n FROM tasks WHERE status='open'").fetchone()["n"] == 1
 
@@ -308,3 +298,43 @@ def test_budget_fraction_and_state_fields(conn, monkeypatch):
     main._conn = conn
     st = TestClient(main.app).get("/api/state", headers={"X-Token": "t"}).json()
     assert st["orcamento_pct"] == 50.0 and "T" in st["orcamento_zera_em"]
+
+
+def test_limits_old_deploy_values_are_replaced(monkeypatch):
+    import importlib
+    from meridiano.engine import config
+    monkeypatch.setenv("DAILY_CALL_LIMIT", "300"); monkeypatch.setenv("DAILY_TOKEN_LIMIT", "400000")
+    c = importlib.reload(config)
+    assert (c.DAILY_CALL_LIMIT, c.DAILY_TOKEN_LIMIT) == (600, 1500000)
+    monkeypatch.setenv("DAILY_TOKEN_LIMIT", "3000000")
+    assert importlib.reload(config).DAILY_TOKEN_LIMIT == 3000000      # valor maior escolhido é respeitado
+    monkeypatch.delenv("DAILY_CALL_LIMIT"); monkeypatch.delenv("DAILY_TOKEN_LIMIT")
+    importlib.reload(config)
+
+
+def test_pacing_never_stops_only_slows(conn, monkeypatch):
+    from meridiano.engine import config, pacing
+    assert pacing.next_delay(conn) == (config.TICK_SECONDS, "nenhum")
+    assert pacing.next_delay(conn, errored=True) == (config.TICK_SECONDS, "erro")
+    assert pacing.next_delay(conn, rate_backoff=120) == (120, "429")
+    conn.execute("INSERT INTO usage_log(model,prompt_tokens,completion_tokens) VALUES ('m',%s,0)", (config.DAILY_TOKEN_LIMIT,))
+    assert pacing.next_delay(conn) == (config.SLOW_TICK_SECONDS, "limite")   # passou do limite duro: lento, não parado
+    assert config.SLOW_TICK_SECONDS < 3600
+
+
+def test_api_engine_status(conn, monkeypatch):
+    monkeypatch.setenv("MERIDIANO_API_TOKEN", "t")
+    from meridiano.engine import pacing
+    from meridiano.api import main
+    ceo = _ceo(conn)
+    main._conn = conn
+    c = TestClient(main.app); h = {"X-Token": "t"}
+    assert c.get("/api/engine", headers=h).json()["vivo"] is False          # nunca iniciou
+    pacing.beat(conn, current=ceo["id"], delay=60)
+    r = c.get("/api/engine", headers=h).json()
+    assert r["vivo"] and r["funcionario_da_vez"] == "Rafael" and 0 <= r["proximo_turno_em_s"] <= 60 and r["motivo_espera"] == "nenhum"
+    pacing.beat(conn, last_turn=ceo["id"], delay=600, reason="limite")
+    r = c.get("/api/engine", headers=h).json()
+    assert r["motivo_espera"] == "limite" and r["ultimo_turno_por"] == "Rafael" and r["funcionario_da_vez"] is None
+    conn.execute("UPDATE engine_status SET heartbeat_at = now() - interval '2 hours'")
+    assert c.get("/api/engine", headers=h).json()["vivo"] is False           # sem batimento: processo morto

@@ -18,7 +18,7 @@ function Login({ onDone, error }) {
 
 export default function App() {
   const [auth, setAuth] = useState(!!getToken());
-  const [d, setD] = useState({ state: null, emps: [], msgs: [], tasks: [], prods: [], ledger: [], reqs: [], acts: [], hist: [] });
+  const [d, setD] = useState({ state: null, emps: [], msgs: [], tasks: [], prods: [], ledger: [], reqs: [], acts: [], hist: [], engine: null });
   const [err, setErr] = useState('');
   const [loginErr, setLoginErr] = useState('');
   const [tab, setTab] = useState(0);
@@ -39,9 +39,9 @@ export default function App() {
     let on = true;
     const load = async () => {
       try {
-        const [state, emps, msgs, tasks, prods, ledger, reqs, acts, hist] = await Promise.all(
-          ['state', 'employees', 'messages?limit=40', 'tasks', 'products', 'ledger', 'owner-requests', 'activity?limit=30', 'history'].map(api));
-        if (on) { setD({ state, emps, msgs, tasks, prods, ledger, reqs, acts, hist }); setErr(''); }
+        const [state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine] = await Promise.all(
+          ['state', 'employees', 'messages?limit=40', 'tasks', 'products', 'ledger', 'owner-requests', 'activity?limit=30', 'history', 'engine'].map(api));
+        if (on) { setD({ state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine }); setErr(''); }
       } catch (e) {
         if (e.message === '401') { setToken(''); setLoginErr('Token inválido. Confira e tente de novo.'); setAuth(false); } else setErr('Sem conexão com o servidor.');
       }
@@ -77,6 +77,11 @@ export default function App() {
       {tab === 0 && <>
         <div className="card" aria-live="polite"><b>Agora:</b>{' '}
           {nowAct ? <>{nowAct.name}{nowAct.target_name ? ` → ${nowAct.target_name}` : ''}: {nowAct.text || nowAct.kind} <small>({ago(nowAct.started_at)})</small></> : 'ninguém agiu nos últimos 3 minutos.'}</div>
+        {d.engine && <p className="note">Motor: {d.engine.vivo ? 'vivo' : 'PARADO'}
+          {d.engine.funcionario_da_vez ? ` · agora é a vez de ${d.engine.funcionario_da_vez}` : ''}
+          {d.engine.proximo_turno_em_s != null ? ` · próximo turno em ${d.engine.proximo_turno_em_s}s` : ''}
+          {d.engine.motivo_espera && d.engine.motivo_espera !== 'nenhum' ? ` · espera por: ${d.engine.motivo_espera}` : ''}
+          {d.engine.ultimo_turno_por ? ` · último turno: ${d.engine.ultimo_turno_por}` : ''}</p>}
         <Office employees={d.emps} selected={sel} onSelect={setSel} reduced={reduced} />
         <p className="note">Ações (escrever, pesquisar, conversar, reunião, contratar, demitir) vêm do banco. Quem está parado passeia pela copa e pelo corredor: isso é só animação de ambiente.</p>
         <section className="card">{who
