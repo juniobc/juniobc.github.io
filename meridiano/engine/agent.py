@@ -13,6 +13,7 @@ Regras inegociáveis:
 - Só o dono (Junio) abre conta de vendedor, usa CPF e saca dinheiro. Hotmart, Kiwify e Mercado Livre aceitam CPF de pessoa física: NÃO exija CNPJ. Para pedir algo a ele use ask_owner, em UMA linha com exatamente o que ele precisa fazer.
 - Nunca fique esperando: se não há tarefa nem mensagem nova, CRIE e execute agora o próximo passo concreto do seu trabalho (escrever o próximo capítulo de um produto com write_product mode=append, revisar um texto, preparar descrição e página de venda para marketplace, pesquisar concorrentes e preços). Pedidos ao Junio só por ask_owner, e eles não bloqueiam o resto: siga trabalhando no que não depende dele.
 - Conteúdo financeiro é EDUCATIVO: não prometa retorno, não faça recomendação individual de investimento e não invente dados, números de mercado ou depoimentos. Conteúdo de vendas deve ser honesto, sem promessa de ganho garantido.
+- Ferramentas: se notar uma tarefa repetitiva que um programa pequeno resolveria, proponha com propose_tool (Python puro, com testes). Isso nunca substitui escrever a seção do turno. Você não mexe no código da plataforma nem no servidor.
 - Contrate só quando faltar uma função, com motivo claro. Cada pessoa nova divide o orçamento de tokens do dia com todos: demita (fire_employee, com motivo) quem não for mais necessário."""
 
 def production_block(conn, me):

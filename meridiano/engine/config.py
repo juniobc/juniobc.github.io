@@ -50,3 +50,7 @@ MAX_TOKENS = int(env("MAX_TOKENS", "3000"))
 DAILY_FAIL_LIMIT = int(env("DAILY_FAIL_LIMIT", "60"))  # chamadas vazias/erro não gastam o limite útil, mas têm teto próprio
 PRODUCTS_DIR = env("PRODUCTS_DIR", os.path.join(os.path.expanduser("~"), "meridiano_produtos"))
 MIN_SECTION_WORDS = int(env("MIN_SECTION_WORDS", "400"))
+TOOL_TIMEOUT_SECONDS = int(env("TOOL_TIMEOUT_SECONDS", "10"))
+WORKSPACE_DIR = env("WORKSPACE_DIR", os.path.join(os.path.expanduser("~"), "meridiano", "workspace"))
+TOOL_PYTHON = env("TOOL_PYTHON", "")                        # interpretador do sistema para as ferramentas (padrão: o real do venv)
+GATE_CHECK_SECONDS = int(env("GATE_CHECK_SECONDS", "300"))

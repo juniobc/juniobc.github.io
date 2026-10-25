@@ -81,7 +81,8 @@ export default function App() {
           {d.engine.funcionario_da_vez ? ` · agora é a vez de ${d.engine.funcionario_da_vez}` : ''}
           {d.engine.proximo_turno_em_s != null ? ` · próximo turno em ${d.engine.proximo_turno_em_s}s` : ''}
           {d.engine.motivo_espera && d.engine.motivo_espera !== 'nenhum' ? ` · espera por: ${d.engine.motivo_espera}` : ''}
-          {d.engine.ultimo_turno_por ? ` · último turno: ${d.engine.ultimo_turno_por}` : ''}</p>}
+          {d.engine.ultimo_turno_por ? ` · último turno: ${d.engine.ultimo_turno_por}` : ''}<br />
+          Ferramentas: {d.engine.isolamento_ferramentas?.ligadas ? 'ligadas' : 'desligadas'} ({d.engine.isolamento_ferramentas?.motivo || 'não verificado'})</p>}
         <Office employees={d.emps} selected={sel} onSelect={setSel} reduced={reduced} />
         <p className="note">Ações (escrever, pesquisar, conversar, reunião, contratar, demitir) vêm do banco. Quem está parado passeia pela copa e pelo corredor: isso é só animação de ambiente.</p>
         <section className="card">{who

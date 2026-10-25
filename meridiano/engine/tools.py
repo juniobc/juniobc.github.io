@@ -36,6 +36,15 @@ SPECS = [
      "parameters": {"type": "object", "properties": {"slug": {"type": "string"}, "reason": {"type": "string"}}, "required": ["slug", "reason"]}},
     {"name": "start_meeting", "description": "Convoca uma reunião curta com colegas (slugs) sobre um assunto. Registra no mural.",
      "parameters": {"type": "object", "properties": {"participants": {"type": "array", "items": {"type": "string"}}, "topic": {"type": "string"}}, "required": ["participants", "topic"]}},
+    {"name": "propose_tool", "description": "Propõe uma ferramenta nova em Python PURO (sem rede, sem arquivos). O código precisa definir `def run(args):` e devolver algo serializável em JSON; imports permitidos: json, re, math, datetime, statistics, csv, textwrap, itertools, collections, decimal, hashlib, base64, unicodedata, string, html, urllib.parse. Os testes (funções test_* com assert que chamam run) rodam antes de ativar. Depois outro chefe revisa e aprova.",
+     "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "description": {"type": "string"}, "python_code": {"type": "string"}, "tests_code": {"type": "string"}, "reason": {"type": "string"}}, "required": ["name", "description", "python_code", "tests_code", "reason"]}},
+    {"name": "list_tools", "description": "Lista as ferramentas criadas por agentes, com status e nível.", "parameters": {"type": "object", "properties": {}}},
+    {"name": "read_tool", "description": "Lê o código e os testes de uma ferramenta (para revisar).",
+     "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
+    {"name": "approve_tool", "description": "Revisor (Presidente ou CEO, nunca o autor): aprova ou recusa uma ferramenta em revisão depois de ler o código.",
+     "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "approve": {"type": "boolean"}, "note": {"type": "string"}}, "required": ["name", "approve", "note"]}},
+    {"name": "run_custom_tool", "description": "Executa uma ferramenta ATIVA, isolada, com os argumentos dados.",
+     "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "args": {"type": "object"}}, "required": ["name"]}},
     {"name": "list_team", "description": "Lista os funcionários ativos.", "parameters": {"type": "object", "properties": {}}},
 ]
 TOOL_DEFS = [{"type": "function", "function": s} for s in SPECS]
@@ -114,6 +123,139 @@ def _after_section_saved(conn, prod, me, sec, words):
     return msg
 
 
+TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{2,39}$")
+REVIEWER_RE = re.compile(r"presidente|ceo", re.I)
+MAX_TOOLS = 30
+MAX_PROPOSALS_PER_DAY = 10
+
+
+def _save_tool_file(name, version, code):
+    try:
+        d = os.path.join(config.WORKSPACE_DIR, "tools", name)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, f"v{version}.py"), "w", encoding="utf-8") as f:
+            f.write(code)
+    except OSError:
+        pass
+
+
+def _log_run(conn, tool, me, kind, args, res):
+    out = json.dumps(res.get("result"), ensure_ascii=False)[:20000] if res.get("ok") else ""
+    conn.execute("INSERT INTO tool_runs(tool_id,tool_name,employee_id,kind,args,ok,output,error,ms) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                 (tool["id"] if tool else None, tool["name"] if tool else "?", me["id"], kind, json.dumps(args, ensure_ascii=False)[:2000],
+                  bool(res.get("ok")), out, str(res.get("error", ""))[:1000], res.get("ms", 0)))
+
+
+def _propose_tool(conn, me, args):
+    from . import sandbox
+    name = str(args["name"]).strip()
+    if not TOOL_NAME_RE.match(name) or name in {s["name"] for s in SPECS}:
+        return "erro: nome inválido (use letras minúsculas, números e _, 3 a 40 caracteres, e não repita o nome de uma tool existente)"
+    code, tests = str(args["python_code"]), str(args["tests_code"])
+    if conn.execute("SELECT COUNT(*) AS n FROM custom_tools").fetchone()["n"] >= MAX_TOOLS and not conn.execute("SELECT 1 FROM custom_tools WHERE name=%s", (name,)).fetchone():
+        return "erro: limite de ferramentas atingido"
+    if conn.execute("SELECT COUNT(*) AS n FROM custom_tool_versions WHERE created_at >= date_trunc('day', now())").fetchone()["n"] >= MAX_PROPOSALS_PER_DAY:
+        return "erro: limite diário de propostas atingido"
+    ok_c, prob_c, helpers = sandbox.validate(code, need_run=True)
+    ok_t, prob_t, helpers_t = sandbox.validate(tests, need_run=False)
+    level, status, note = "A", "revisao", ""
+    if not (ok_c and ok_t):
+        status, note = "recusada", "validação: " + "; ".join(prob_c + prob_t)
+    elif helpers or helpers_t:
+        level, status = "C", "pendente_dono"
+    existing = conn.execute("SELECT * FROM custom_tools WHERE name=%s", (name,)).fetchone()
+    if existing:
+        if existing["status"] == "ativa" and existing["author_id"] != me["id"]:
+            return "erro: só o autor pode propor nova versão de uma ferramenta ativa"
+        version = existing["version"] + 1
+        conn.execute("UPDATE custom_tools SET version=%s, description=%s, code=%s, tests_code=%s, level=%s, status=%s, reason=%s, review_note=%s, "
+                     "reviewed_by=NULL, last_error='', updated_at=now() WHERE id=%s",
+                     (version, str(args["description"])[:300], code, tests, level, status, str(args["reason"])[:500], note, existing["id"]))
+        tid = existing["id"]
+    else:
+        version = 1
+        tid = conn.execute("INSERT INTO custom_tools(name,description,code,tests_code,level,status,author_id,reason,review_note) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                           (name, str(args["description"])[:300], code, tests, level, status, me["id"], str(args["reason"])[:500], note)).fetchone()["id"]
+    conn.execute("INSERT INTO custom_tool_versions(tool_id,version,code,tests_code,author_id) VALUES (%s,%s,%s,%s,%s)", (tid, version, code, tests, me["id"]))
+    _save_tool_file(name, version, code)
+    tool = {"id": tid, "name": name}
+    if status == "recusada":
+        return f"ferramenta recusada na validação: {note}"
+    if level == "C":
+        body = f"Ferramenta '{name}' precisa de rede/arquivo (nível C): {str(args['reason'])[:150]}. Aprovar ou recusar no painel."
+        if not conn.execute("SELECT 1 FROM owner_requests WHERE body=%s", (body,)).fetchone():
+            conn.execute("INSERT INTO owner_requests(from_id,body) VALUES (%s,%s)", (me["id"], body))
+        return "ferramenta de nível C: ficou pendente e o dono foi avisado; ela só ativa se ele aprovar"
+    if not sandbox.enabled():   # portão fechado: grava como rascunho, não executa nada
+        conn.execute("UPDATE custom_tools SET status='rascunho', review_note=%s WHERE id=%s", (sandbox.OFF_MSG + "; os testes rodam quando as ferramentas forem ligadas", tid))
+        return f"ferramenta '{name}' v{version} salva como RASCUNHO: {sandbox.OFF_MSG}. Os testes rodam quando o isolamento for liberado."
+    res = sandbox.execute(code, tests=tests)
+    _log_run(conn, tool, me, "teste", {}, res)
+    if not res.get("ok"):
+        conn.execute("UPDATE custom_tools SET status='recusada', review_note=%s, last_error=%s WHERE id=%s", ("testes falharam: " + res.get("error", ""), res.get("error", "")[:500], tid))
+        return f"os testes falharam, ferramenta recusada: {res.get('error')}"
+    return f"ferramenta '{name}' v{version} passou na validação e nos {res['result'].get('testes', '?')} teste(s); aguarda revisão de outro chefe (read_tool + approve_tool)"
+
+
+def process_drafts(conn):
+    """Quando o portão abre, roda os testes dos rascunhos e os manda para revisão (ou recusa). Devolve quantos processou."""
+    from . import sandbox
+    if not sandbox.enabled():
+        return 0
+    n = 0
+    for t in conn.execute("SELECT * FROM custom_tools WHERE status='rascunho'").fetchall():
+        res = sandbox.execute(t["code"], tests=t["tests_code"])
+        _log_run(conn, t, {"id": t["author_id"]}, "teste", {}, res)
+        if res.get("ok"):
+            conn.execute("UPDATE custom_tools SET status='revisao', review_note='', updated_at=now() WHERE id=%s", (t["id"],))
+        else:
+            conn.execute("UPDATE custom_tools SET status='recusada', review_note=%s, last_error=%s, updated_at=now() WHERE id=%s",
+                         ("testes falharam: " + str(res.get("error")), str(res.get("error"))[:500], t["id"]))
+        n += 1
+    return n
+
+
+def _approve_tool(conn, me, args):
+    from . import sandbox
+    if not sandbox.enabled():
+        return sandbox.OFF_MSG
+    if not REVIEWER_RE.search(me["role"]):
+        return "erro: só Presidente ou CEO revisam ferramentas"
+    t = conn.execute("SELECT * FROM custom_tools WHERE name=%s", (str(args["name"]).strip(),)).fetchone()
+    if not t:
+        return "erro: ferramenta não existe"
+    if t["author_id"] == me["id"]:
+        return "erro: o autor não pode aprovar a própria ferramenta"
+    if t["level"] == "C":
+        return "erro: ferramenta de nível C só o dono aprova"
+    if t["status"] != "revisao":
+        return f"erro: a ferramenta está '{t['status']}', não em revisão"
+    note = str(args.get("note", ""))[:400]
+    if len(note) < 5:
+        return "erro: escreva a nota da revisão"
+    status = "ativa" if args.get("approve") else "recusada"
+    conn.execute("UPDATE custom_tools SET status=%s, reviewed_by=%s, review_note=%s, updated_at=now() WHERE id=%s", (status, me["id"], note, t["id"]))
+    return f"ferramenta '{t['name']}' {'aprovada e ATIVA' if status == 'ativa' else 'recusada'}"
+
+
+def _run_custom_tool(conn, me, args):
+    from . import sandbox
+    if not sandbox.enabled():
+        return sandbox.OFF_MSG
+    t = conn.execute("SELECT * FROM custom_tools WHERE name=%s", (str(args["name"]).strip(),)).fetchone()
+    if not t:
+        return "erro: ferramenta não existe (use list_tools)"
+    if t["status"] != "ativa":
+        return f"erro: a ferramenta está '{t['status']}'; só ferramentas ativas rodam"
+    call_args = args.get("args") if isinstance(args.get("args"), dict) else {}
+    res = sandbox.execute(t["code"], args=call_args)
+    _log_run(conn, t, me, "uso", call_args, res)
+    conn.execute("UPDATE custom_tools SET uses=uses+1, last_error=%s WHERE id=%s", ("" if res.get("ok") else str(res.get("error"))[:500], t["id"]))
+    if not res.get("ok"):
+        return f"erro na ferramenta: {res.get('error')}"
+    return json.dumps(res["result"], ensure_ascii=False) + (f"\n(stdout: {res['stdout'][:500]})" if res.get("stdout") else "")
+
+
 def run_tool(conn, me, name, args):
     """Executa uma tool para o funcionário `me` (dict). Devolve texto (limitado)."""
     out = cap(_run_tool(conn, me, name, args))
@@ -134,6 +276,8 @@ def _record_activity(conn, me, name, args, out):
         return
     if name == "web_search":
         activity(conn, me["id"], "pesquisando", f"Pesquisa: {str(args.get('query', ''))[:80]}")
+    elif name in ("propose_tool", "approve_tool", "run_custom_tool"):
+        activity(conn, me["id"], "planejando", {"propose_tool": "Propôs ferramenta", "approve_tool": "Revisou ferramenta", "run_custom_tool": "Usou ferramenta"}[name] + f" {str(args.get('name', ''))[:40]}")
     elif name == "write_section":
         activity(conn, me["id"], "escrevendo_produto", f"Escreve {str(args.get('product_name', ''))[:60]}, seção {args.get('section_number')}")
     elif name == "request_rewrite":
@@ -232,6 +376,20 @@ def _run_tool(conn, me, name, args):
                     return f"já existe o pedido {r['id']} ao dono; não repita."
             conn.execute("INSERT INTO owner_requests(from_id,body) VALUES (%s,%s)", (me["id"], body))
             return "pedido registrado para o dono"
+        if name == "propose_tool":
+            return _propose_tool(conn, me, args)
+        if name == "list_tools":
+            rows = conn.execute("SELECT t.name,t.version,t.level,t.status,t.description,t.uses,a.name AS autor FROM custom_tools t LEFT JOIN employees a ON a.id=t.author_id ORDER BY t.id").fetchall()
+            return "\n".join(f"{r['name']} v{r['version']} | nível {r['level']} | {r['status']} | {r['autor']} | {r['uses']} usos | {r['description'][:80]}" for r in rows) or "nenhuma ferramenta ainda"
+        if name == "read_tool":
+            t = conn.execute("SELECT * FROM custom_tools WHERE name=%s", (str(args["name"]).strip(),)).fetchone()
+            if not t:
+                return "erro: ferramenta não existe"
+            return f"{t['name']} v{t['version']} [{t['status']}, nível {t['level']}] {t['reason']}\n--- código ---\n{t['code']}\n--- testes ---\n{t['tests_code']}"
+        if name == "approve_tool":
+            return _approve_tool(conn, me, args)
+        if name == "run_custom_tool":
+            return _run_custom_tool(conn, me, args)
         if name == "write_section":
             prod, sec = _find_section(conn, args["product_name"], args["section_number"])
             if not sec:
