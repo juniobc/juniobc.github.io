@@ -6,3 +6,8 @@ export async function api(path) {
   if (!r.ok) throw new Error(String(r.status));
   return r.json();
 }
+export async function post(path) {
+  const r = await fetch('api/' + path, { method: 'POST', headers: { 'X-Token': getToken() } });
+  if (!r.ok) throw new Error(String(r.status));
+  return r.json();
+}

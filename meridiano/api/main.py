@@ -53,7 +53,10 @@ def state():
 @app.get("/api/employees", dependencies=[Depends(read_auth)])
 def employees():
     return conn().execute(
-        "SELECT e.id,e.slug,e.name,e.role,e.area,e.model,e.status,e.activity,e.hire_reason,h.name AS hired_by "
+        "SELECT e.id,e.slug,e.name,e.role,e.area,e.model,e.status,e.activity,e.hire_reason,h.name AS hired_by, "
+        "(SELECT COALESCE(SUM(u.prompt_tokens+u.completion_tokens),0) FROM usage_log u WHERE u.employee_id=e.id "
+        "AND u.created_at >= date_trunc('day', now())) AS tokens_hoje, "
+        "(SELECT COUNT(*) FROM usage_log u WHERE u.employee_id=e.id AND u.created_at >= date_trunc('day', now())) AS chamadas_hoje "
         "FROM employees e LEFT JOIN employees h ON h.id=e.hired_by WHERE e.active ORDER BY e.id").fetchall()
 
 
@@ -74,7 +77,7 @@ def tasks(limit: int = Query(50, le=200)):
 
 @app.get("/api/products", dependencies=[Depends(read_auth)])
 def products():
-    return conn().execute("SELECT id,name,description,file_path,created_at FROM products ORDER BY id DESC").fetchall()
+    return conn().execute("SELECT id,name,description,file_path,content,status,price_cents,updated_at FROM products ORDER BY id DESC").fetchall()
 
 
 @app.get("/api/ledger", dependencies=[Depends(read_auth)])
@@ -92,6 +95,19 @@ def deploy_log(lines: int = Query(50, ge=1, le=50)):
     except FileNotFoundError:
         tail = []
     return {"path": path, "linhas": tail}
+
+
+@app.get("/api/owner-requests", dependencies=[Depends(read_auth)])
+def owner_requests():
+    return conn().execute(
+        "SELECT r.id,r.body,r.done,r.created_at,e.name AS from_name FROM owner_requests r "
+        "LEFT JOIN employees e ON e.id=r.from_id ORDER BY r.done, r.id DESC LIMIT 30").fetchall()
+
+
+@app.post("/api/owner-requests/{rid}/done", dependencies=[Depends(read_auth)])  # não mexe em dinheiro
+def owner_request_done(rid: int):
+    conn().execute("UPDATE owner_requests SET done=true WHERE id=%s", (rid,))
+    return {"ok": True}
 
 
 class Entry(BaseModel):

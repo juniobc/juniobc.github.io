@@ -1,4 +1,5 @@
 """Tools dos agentes. Propositalmente NÃO existe tool de dinheiro nem de envio de mensagem externa."""
+import difflib
 import json
 import os
 import re
@@ -15,8 +16,13 @@ SPECS = [
      "parameters": {"type": "object", "properties": {"assignee": {"type": "string"}, "title": {"type": "string"}, "details": {"type": "string"}}, "required": ["assignee", "title"]}},
     {"name": "complete_task", "description": "Conclui uma tarefa sua com o resultado.",
      "parameters": {"type": "object", "properties": {"task_id": {"type": "integer"}, "result": {"type": "string"}}, "required": ["task_id", "result"]}},
-    {"name": "write_product_file", "description": "Escreve um arquivo de produto (texto/markdown/csv) e registra o produto.",
-     "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "filename": {"type": "string"}, "content": {"type": "string"}, "description": {"type": "string"}}, "required": ["product_name", "filename", "content"]}},
+    {"name": "write_product", "description": "Escreve (ou continua) o CONTEÚDO de um produto digital. Não existem arquivos prontos: você mesmo escreve o texto. Se o produto já existe, atualiza em vez de criar outro. Para textos longos use mode=append em várias chamadas.",
+     "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "content": {"type": "string"}, "mode": {"type": "string", "enum": ["replace", "append"]}, "description": {"type": "string"}, "price_brl": {"type": "number"}, "status": {"type": "string", "enum": ["rascunho", "revisao", "pronto"]}}, "required": ["product_name", "content"]}},
+    {"name": "read_product", "description": "Lê o conteúdo já escrito de um produto.",
+     "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}}, "required": ["product_name"]}},
+    {"name": "list_products", "description": "Lista produtos com status, preço e tamanho do conteúdo.", "parameters": {"type": "object", "properties": {}}},
+    {"name": "ask_owner", "description": "Registra UM pedido objetivo ao dono (Junio) para algo que só ele pode fazer (conta de vendedor, CPF, aprovação). Uma linha.",
+     "parameters": {"type": "object", "properties": {"body": {"type": "string"}}, "required": ["body"]}},
     {"name": "post_message", "description": "Envia mensagem a um colega (slug) ou ao mural (to vazio). Só colegas internos.",
      "parameters": {"type": "object", "properties": {"to": {"type": "string"}, "body": {"type": "string"}}, "required": ["body"]}},
     {"name": "hire_employee", "description": "Contrata um agente novo. Só cargos de chefia. Exige motivo.",
@@ -24,6 +30,27 @@ SPECS = [
     {"name": "list_team", "description": "Lista os funcionários ativos.", "parameters": {"type": "object", "properties": {}}},
 ]
 TOOL_DEFS = [{"type": "function", "function": s} for s in SPECS]
+
+
+def norm(t):
+    return re.sub(r"\W+", " ", str(t).lower()).strip()
+
+
+def similar(a, b):
+    a, b = norm(a), norm(b)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if difflib.SequenceMatcher(None, a, b).ratio() >= 0.8:
+        return True
+    ta, tb = set(a.split()), set(b.split())
+    return len(ta & tb) / max(1, len(ta | tb)) >= 0.7
+
+
+def cap(text, n=1500):
+    text = str(text)
+    return text if len(text) <= n else text[:n] + " …(cortado)"
 
 
 def slugify(s):
@@ -47,7 +74,11 @@ def web_search(query):
 
 
 def run_tool(conn, me, name, args):
-    """Executa uma tool para o funcionário `me` (dict). Devolve texto."""
+    """Executa uma tool para o funcionário `me` (dict). Devolve texto (limitado)."""
+    return cap(_run_tool(conn, me, name, args))
+
+
+def _run_tool(conn, me, name, args):
     try:
         if name == "web_search":
             return web_search(str(args["query"])[:200])
@@ -58,6 +89,9 @@ def run_tool(conn, me, name, args):
             to = _emp_by_slug(conn, args["assignee"])
             if not to:
                 return "erro: funcionário não existe"
+            for t in conn.execute("SELECT t.id,t.title,e.name FROM tasks t LEFT JOIN employees e ON e.id=t.assignee_id WHERE t.status='open'").fetchall():
+                if similar(t["title"], args["title"]):
+                    return f"não criei: já existe a tarefa {t['id']} aberta ('{t['title']}', com {t['name']}). Trabalhe nela em vez de repetir."
             r = conn.execute("INSERT INTO tasks(title,details,assignee_id,created_by) VALUES (%s,%s,%s,%s) RETURNING id",
                              (str(args["title"])[:200], str(args.get("details", ""))[:2000], to["id"], me["id"])).fetchone()
             return f"tarefa {r['id']} criada para {to['name']}"
@@ -65,17 +99,53 @@ def run_tool(conn, me, name, args):
             r = conn.execute("UPDATE tasks SET status='done', result=%s, done_at=now() WHERE id=%s AND assignee_id=%s AND status='open' RETURNING id",
                              (str(args["result"])[:4000], int(args["task_id"]), me["id"])).fetchone()
             return "tarefa concluída" if r else "erro: tarefa não é sua ou não está aberta"
-        if name == "write_product_file":
-            fn = os.path.basename(str(args["filename"]))
-            if not re.fullmatch(r"[\w.\-]{1,80}", fn) or fn.startswith("."):
-                return "erro: nome de arquivo inválido"
-            os.makedirs(config.PRODUCTS_DIR, exist_ok=True)
-            path = os.path.join(config.PRODUCTS_DIR, fn)
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(str(args["content"])[:200000])
-            conn.execute("INSERT INTO products(name,description,file_path,created_by) VALUES (%s,%s,%s,%s)",
-                         (str(args["product_name"])[:200], str(args.get("description", ""))[:1000], fn, me["id"]))
-            return f"arquivo {fn} salvo"
+        if name == "write_product":
+            pname = str(args["product_name"]).strip()[:200]
+            content = str(args["content"])[:20000]
+            mode = args.get("mode") or "replace"
+            status = args.get("status") if args.get("status") in ("rascunho", "revisao", "pronto") else None
+            price = int(round(float(args["price_brl"]) * 100)) if args.get("price_brl") not in (None, "") else None
+            row = None
+            for p in conn.execute("SELECT id,name,content FROM products").fetchall():
+                if similar(p["name"], pname):
+                    row = p
+                    break
+            if row:
+                new_content = (row["content"] + "\n\n" + content) if mode == "append" and row["content"] else content
+                new_content = new_content[:60000]
+                conn.execute("UPDATE products SET content=%s, description=COALESCE(NULLIF(%s,''),description), status=COALESCE(%s,status), "
+                             "price_cents=COALESCE(%s,price_cents), updated_at=now() WHERE id=%s",
+                             (new_content, str(args.get("description", ""))[:1000], status, price, row["id"]))
+                pid, shown, total = row["id"], row["name"], len(new_content)
+            else:
+                fn = slugify(pname) + ".md"
+                r = conn.execute("INSERT INTO products(name,description,file_path,created_by,content,status,price_cents) "
+                                 "VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                                 (pname, str(args.get("description", ""))[:1000], fn, me["id"], content, status or "rascunho", price)).fetchone()
+                pid, shown, total = r["id"], pname, len(content)
+            try:  # cópia em arquivo para download; o conteúdo oficial está no banco
+                os.makedirs(config.PRODUCTS_DIR, exist_ok=True)
+                body = conn.execute("SELECT content,file_path FROM products WHERE id=%s", (pid,)).fetchone()
+                with open(os.path.join(config.PRODUCTS_DIR, os.path.basename(body["file_path"])), "w", encoding="utf-8") as f:
+                    f.write(body["content"])
+            except OSError:
+                pass
+            return f"produto '{shown}' ({'atualizado' if row else 'criado'}): {total} caracteres guardados"
+        if name == "read_product":
+            for p in conn.execute("SELECT name,content,status FROM products").fetchall():
+                if similar(p["name"], args["product_name"]):
+                    return f"[{p['status']}] {p['name']} ({len(p['content'])} caracteres)\n" + cap(p["content"], 3000)
+            return "erro: produto não existe (use list_products)"
+        if name == "list_products":
+            rows = conn.execute("SELECT name,status,price_cents,length(content) AS n FROM products ORDER BY id").fetchall()
+            return "\n".join(f"{r['name']} | {r['status']} | {'R$ %.2f' % (r['price_cents'] / 100) if r['price_cents'] else 'sem preço'} | {r['n']} caracteres" for r in rows) or "nenhum produto ainda"
+        if name == "ask_owner":
+            body = str(args["body"]).strip()[:300]
+            for r in conn.execute("SELECT id,body FROM owner_requests WHERE NOT done").fetchall():
+                if similar(r["body"], body):
+                    return f"já existe o pedido {r['id']} ao dono; não repita."
+            conn.execute("INSERT INTO owner_requests(from_id,body) VALUES (%s,%s)", (me["id"], body))
+            return "pedido registrado para o dono"
         if name == "post_message":
             to_slug = (args.get("to") or "").strip()
             to_id = None
