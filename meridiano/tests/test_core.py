@@ -137,7 +137,7 @@ def test_migrations_idempotent_and_clean_old_empty_usage(url, monkeypatch):
     c.execute("INSERT INTO employees(slug,name,role,area,instructions,model) VALUES ('a','A','CEO','D','x','m'),('b','B','CEO','D','x','m')")
     c.execute("INSERT INTO usage_log(employee_id,model,prompt_tokens,completion_tokens) SELECT id,'m',100,3500 FROM employees, generate_series(1,2)")
     c.execute("INSERT INTO messages(from_id,body) SELECT id,'oi' FROM employees WHERE slug='b'")
-    assert migrate.migrate(c) == ["002_zera_uso_vazio.sql", "003_produtos_pedidos_pacing.sql"]
+    assert migrate.migrate(c) == ["002_zera_uso_vazio.sql", "003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql"]
     assert migrate.migrate(c) == []
     ok = c.execute("SELECT e.slug FROM usage_log u JOIN employees e ON e.id=u.employee_id WHERE u.ok GROUP BY 1").fetchall()
     assert [r["slug"] for r in ok] == ["b"]  # b tem mensagem gravada: chamadas dele eram úteis
@@ -218,6 +218,58 @@ def test_migration_003_cleans_duplicates(url, monkeypatch):
         c.execute("INSERT INTO products(name,file_path) VALUES ('Toolkit X','a.txt')")
         c.execute("INSERT INTO tasks(title) VALUES ('Pesquisar copy')")
     c.execute("INSERT INTO tasks(title,details) VALUES ('Receber fontes','mandar os arquivos .txt fonte')")
-    assert migrate.migrate(c) == ["003_produtos_pedidos_pacing.sql"]
+    assert migrate.migrate(c) == ["003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql"]
     assert c.execute("SELECT COUNT(*) AS n FROM products").fetchone()["n"] == 1
     assert c.execute("SELECT COUNT(*) AS n FROM tasks WHERE status='open'").fetchone()["n"] == 1
+
+
+def test_fire_rules_and_activity(conn, tmp_path, monkeypatch):
+    from meridiano.engine import config, tools
+    monkeypatch.setattr(config, "PRODUCTS_DIR", str(tmp_path))
+    ceo = _ceo(conn)
+    pres = conn.execute("SELECT * FROM employees WHERE slug='presidente'").fetchone()
+    hire = lambda n, r: tools.run_tool(conn, ceo, "hire_employee", {"name": n, "role": r, "area": "A", "instructions": "x", "reason": "falta função"})
+    hire("Luiza", "Gerente de Conteúdo"); hire("Davi", "Redator")
+    luiza = conn.execute("SELECT * FROM employees WHERE slug='luiza'").fetchone()
+    davi = conn.execute("SELECT * FROM employees WHERE slug='davi'").fetchone()
+    # regras
+    assert tools.run_tool(conn, davi, "fire_employee", {"slug": "luiza", "reason": "teste teste"}).startswith("erro")   # redator não demite
+    assert tools.run_tool(conn, ceo, "fire_employee", {"slug": "presidente", "reason": "teste teste"}).startswith("erro")  # fundador
+    assert tools.run_tool(conn, luiza, "fire_employee", {"slug": "luiza", "reason": "teste teste"}).startswith("erro")     # a si mesma
+    assert tools.run_tool(conn, ceo, "fire_employee", {"slug": "davi", "reason": "x"}).startswith("erro")                  # sem motivo
+    # demissão com tarefa aberta passando para o chefe (quem contratou = CEO)
+    tools.run_tool(conn, ceo, "create_task", {"assignee": "davi", "title": "Escrever guia de planilhas"})
+    out = tools.run_tool(conn, luiza, "fire_employee", {"slug": "davi", "reason": "função não é mais necessária"})
+    assert "demitido" in out and "1 tarefa" in out
+    d = conn.execute("SELECT * FROM employees WHERE slug='davi'").fetchone()
+    assert not d["active"] and d["fired_at"] and d["fire_reason"] and d["fired_by"] == luiza["id"]
+    assert conn.execute("SELECT assignee_id FROM tasks").fetchone()["assignee_id"] == ceo["id"]
+    assert conn.execute("SELECT COUNT(*) AS n FROM messages WHERE body LIKE 'Demitiu Davi%'").fetchone()["n"] == 1
+    # atividade só do que aconteceu
+    tools.run_tool(conn, ceo, "post_message", {"to": "presidente", "body": "Plano pronto"})
+    tools.run_tool(conn, ceo, "write_product", {"product_name": "Guia", "content": "texto"})
+    tools.run_tool(conn, ceo, "post_message", {"to": "ninguem", "body": "x"})  # erro: não registra
+    kinds = [r["kind"] for r in conn.execute("SELECT kind FROM activity WHERE employee_id=%s ORDER BY id", (ceo["id"],)).fetchall()]
+    assert kinds.count("conversando") == 1 and "escrevendo_produto" in kinds and "contratando" in kinds
+    tgt = conn.execute("SELECT target_id FROM activity WHERE kind='conversando'").fetchone()["target_id"]
+    assert tgt == pres["id"]
+    tools.run_tool(conn, ceo, "start_meeting", {"participants": ["presidente", "luiza"], "topic": "Preço do guia"})
+    assert conn.execute("SELECT COUNT(*) AS n FROM activity WHERE kind='reunião'").fetchone()["n"] == 3
+
+
+def test_api_activity_history_card(conn, monkeypatch):
+    monkeypatch.setenv("MERIDIANO_API_TOKEN", "t")
+    from meridiano.engine import tools
+    from meridiano.api import main
+    ceo = _ceo(conn)
+    tools.run_tool(conn, ceo, "hire_employee", {"name": "Luiza", "role": "Gerente", "area": "A", "instructions": "x", "reason": "r"})
+    tools.run_tool(conn, ceo, "post_message", {"to": "luiza", "body": "Bem-vinda"})
+    main._conn = conn
+    c = TestClient(main.app); h = {"X-Token": "t"}
+    emps = {e["slug"]: e for e in c.get("/api/employees", headers=h).json()}
+    assert emps["ceo"]["atividade_tipo"] == "conversando" and emps["ceo"]["atividade_alvo"] == "luiza"
+    assert c.get("/api/activity", headers=h).json()[0]["slug"] == "ceo"
+    assert {x["tipo"] for x in c.get("/api/history", headers=h).json()} == {"contratado"}
+    card = c.get("/api/employees/ceo", headers=h).json()
+    assert card["mensagens"][0]["body"] == "Bem-vinda" and card["ultima_atividade"]["kind"] == "conversando"
+    assert c.get("/api/employees/nao-existe", headers=h).status_code == 404

@@ -8,6 +8,7 @@ import httpx
 from . import config
 
 HIRER_RE = re.compile(r"presidente|ceo|diretor|diretora|gerente", re.I)
+FOUNDER_RE = re.compile(r"presidente|ceo", re.I)
 
 SPECS = [
     {"name": "web_search", "description": "Pesquisa na web e devolve títulos, links e trechos.",
@@ -27,6 +28,10 @@ SPECS = [
      "parameters": {"type": "object", "properties": {"to": {"type": "string"}, "body": {"type": "string"}}, "required": ["body"]}},
     {"name": "hire_employee", "description": "Contrata um agente novo. Só cargos de chefia. Exige motivo.",
      "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "role": {"type": "string"}, "area": {"type": "string"}, "instructions": {"type": "string"}, "reason": {"type": "string"}}, "required": ["name", "role", "area", "instructions", "reason"]}},
+    {"name": "fire_employee", "description": "Demite um funcionário (não pode ser Presidente, CEO nem você). Só chefia. Exige motivo. Cada contratação divide o orçamento de tokens do dia: demita quem não é mais necessário.",
+     "parameters": {"type": "object", "properties": {"slug": {"type": "string"}, "reason": {"type": "string"}}, "required": ["slug", "reason"]}},
+    {"name": "start_meeting", "description": "Convoca uma reunião curta com colegas (slugs) sobre um assunto. Registra no mural.",
+     "parameters": {"type": "object", "properties": {"participants": {"type": "array", "items": {"type": "string"}}, "topic": {"type": "string"}}, "required": ["participants", "topic"]}},
     {"name": "list_team", "description": "Lista os funcionários ativos.", "parameters": {"type": "object", "properties": {}}},
 ]
 TOOL_DEFS = [{"type": "function", "function": s} for s in SPECS]
@@ -75,7 +80,41 @@ def web_search(query):
 
 def run_tool(conn, me, name, args):
     """Executa uma tool para o funcionário `me` (dict). Devolve texto (limitado)."""
-    return cap(_run_tool(conn, me, name, args))
+    out = cap(_run_tool(conn, me, name, args))
+    try:
+        _record_activity(conn, me, name, args, out)
+    except Exception:  # registrar atividade nunca derruba a tool
+        pass
+    return out
+
+
+def activity(conn, emp_id, kind, text="", target_id=None):
+    conn.execute("INSERT INTO activity(employee_id,kind,text,target_id) VALUES (%s,%s,%s,%s)", (emp_id, kind, text[:200], target_id))
+
+
+def _record_activity(conn, me, name, args, out):
+    """Grava só o que realmente aconteceu: tool que deu erro ou foi recusada não vira atividade."""
+    if out.startswith(("erro", "não criei", "já existe")):
+        return
+    if name == "web_search":
+        activity(conn, me["id"], "pesquisando", f"Pesquisa: {str(args.get('query', ''))[:80]}")
+    elif name in ("write_product", "read_product"):
+        activity(conn, me["id"], "escrevendo_produto", f"{'Escreve' if name == 'write_product' else 'Lê'} {str(args.get('product_name', ''))[:80]}")
+    elif name == "post_message":
+        to = _emp_by_slug(conn, (args.get("to") or "").strip()) if args.get("to") else None
+        activity(conn, me["id"], "conversando", str(args.get("body", ""))[:120], to["id"] if to else None)
+    elif name == "start_meeting":
+        for sl in args.get("participants") or []:
+            e = _emp_by_slug(conn, str(sl))
+            if e:
+                activity(conn, e["id"], "reunião", str(args.get("topic", ""))[:120])
+        activity(conn, me["id"], "reunião", str(args.get("topic", ""))[:120])
+    elif name == "hire_employee":
+        activity(conn, me["id"], "contratando", f"Contratou {str(args.get('name', ''))[:60]}")
+    elif name == "fire_employee":
+        activity(conn, me["id"], "demitindo", f"Demitiu {str(args.get('slug', ''))[:60]}")
+    elif name in ("create_task", "complete_task", "ask_owner"):
+        activity(conn, me["id"], "planejando", {"create_task": "Criou tarefa", "complete_task": "Concluiu tarefa", "ask_owner": "Pediu algo ao dono"}[name])
 
 
 def _run_tool(conn, me, name, args):
@@ -156,6 +195,38 @@ def _run_tool(conn, me, name, args):
                 to_id = to["id"]
             conn.execute("INSERT INTO messages(from_id,to_id,body) VALUES (%s,%s,%s)", (me["id"], to_id, str(args["body"])[:1000]))
             return "mensagem registrada"
+        if name == "fire_employee":
+            if not HIRER_RE.search(me["role"]):
+                return "erro: seu cargo não pode demitir"
+            target = _emp_by_slug(conn, str(args["slug"]).strip())
+            if not target:
+                return "erro: funcionário não existe ou já foi demitido"
+            if target["id"] == me["id"]:
+                return "erro: você não pode demitir a si mesmo"
+            if FOUNDER_RE.search(target["role"]):
+                return "erro: Presidente e CEO não podem ser demitidos por agentes"
+            reason = str(args["reason"]).strip()[:500]
+            if len(reason) < 5:
+                return "erro: informe o motivo"
+            boss = conn.execute("SELECT id FROM employees WHERE id=%s AND active", (target["hired_by"],)).fetchone() if target["hired_by"] else None
+            boss_id = boss["id"] if boss and boss["id"] != target["id"] else me["id"]
+            conn.execute("UPDATE employees SET active=false, status='idle', activity='', fired_at=now(), fire_reason=%s, fired_by=%s WHERE id=%s",
+                         (reason, me["id"], target["id"]))
+            moved = conn.execute("UPDATE tasks SET assignee_id=%s WHERE assignee_id=%s AND status='open' RETURNING id", (boss_id, target["id"])).fetchall()
+            conn.execute("INSERT INTO messages(from_id,to_id,body) VALUES (%s,NULL,%s)",
+                         (me["id"], f"Demitiu {target['name']} ({target['role']}). Motivo: {reason[:300]}"))
+            return f"{target['name']} demitido; {len(moved)} tarefa(s) abertas passaram para o chefe"
+        if name == "start_meeting":
+            names = []
+            for sl in (args.get("participants") or [])[:6]:
+                e = _emp_by_slug(conn, str(sl))
+                if e and e["id"] != me["id"]:
+                    names.append(e["name"])
+            if not names:
+                return "erro: nenhum participante válido"
+            conn.execute("INSERT INTO messages(from_id,to_id,body) VALUES (%s,NULL,%s)",
+                         (me["id"], f"Reunião com {', '.join(names)}: {str(args['topic'])[:200]}"))
+            return "reunião registrada"
         if name == "hire_employee":
             if not HIRER_RE.search(me["role"]):
                 return "erro: seu cargo não pode contratar"
