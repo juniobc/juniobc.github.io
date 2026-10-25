@@ -26,3 +26,9 @@ def beat(conn, current=None, last_turn=None, delay=0, reason="nenhum"):
         "last_turn_employee_id=COALESCE(%s::integer, last_turn_employee_id), last_turn_at=CASE WHEN %s::integer IS NULL THEN last_turn_at ELSE now() END, "
         "next_turn_at=now() + make_interval(secs => %s::integer), sleep_s=%s::integer, wait_reason=%s WHERE id=1",
         (current, last_turn, last_turn, delay, delay, reason))
+
+
+def record_isolation(conn):
+    """Grava o que o isolamento de ferramentas realmente consegue neste servidor (aparece em /api/engine)."""
+    from . import sandbox
+    conn.execute("UPDATE engine_status SET isolation=%s WHERE id=1", (sandbox.isolation_report(),))

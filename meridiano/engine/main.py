@@ -21,6 +21,7 @@ def main():
     seed.seed(conn)
     seed.refresh_instructions(conn)
     plan.ensure(conn)
+    pacing.record_isolation(conn)
     conn.execute("UPDATE employees SET model=%s WHERE model = ANY(%s)", (config.DEFAULT_ROTATION[0], list(config.AVOID)))
     log.info("limites efetivos: %s chamadas, %s tokens por dia", config.DAILY_CALL_LIMIT, config.DAILY_TOKEN_LIMIT)
     last = 0
