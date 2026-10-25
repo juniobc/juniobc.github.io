@@ -50,7 +50,7 @@ function MpTokenCard({ onSaved }) {
 
 export default function App() {
   const [auth, setAuth] = useState(!!getToken());
-  const [d, setD] = useState({ state: null, emps: [], msgs: [], tasks: [], prods: [], ledger: [], reqs: [], acts: [], hist: [], engine: null, loja: [], opps: [], orders: [] });
+  const [d, setD] = useState({ state: null, emps: [], msgs: [], tasks: [], prods: [], ledger: [], reqs: [], acts: [], hist: [], engine: null, loja: [], opps: [], orders: [], lojaStatus: null });
   const [err, setErr] = useState('');
   const [loginErr, setLoginErr] = useState('');
   const [tab, setTab] = useState(0);
@@ -71,9 +71,9 @@ export default function App() {
     let on = true;
     const load = async () => {
       try {
-        const [state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps, orders] = await Promise.all(
-          ['state', 'employees', 'messages?limit=40', 'tasks', 'products', 'ledger', 'owner-requests', 'activity?limit=30', 'history', 'engine', 'store/products', 'opportunities', 'orders'].map(api));
-        if (on) { setD({ state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps, orders }); setErr(''); }
+        const [state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps, orders, lojaStatus] = await Promise.all(
+          ['state', 'employees', 'messages?limit=40', 'tasks', 'products', 'ledger', 'owner-requests', 'activity?limit=30', 'history', 'engine', 'store/products', 'opportunities', 'orders', 'store/status'].map(api));
+        if (on) { setD({ state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps, orders, lojaStatus }); setErr(''); }
       } catch (e) {
         if (e.message === '401') { setToken(''); setLoginErr('Token inválido. Confira e tente de novo.'); setAuth(false); } else setErr('Sem conexão com o servidor.');
       }
@@ -117,6 +117,7 @@ export default function App() {
           {d.engine.motivo_espera && d.engine.motivo_espera !== 'nenhum' ? ` · espera por: ${d.engine.motivo_espera}` : ''}
           {d.engine.ultimo_turno_por ? ` · último turno: ${d.engine.ultimo_turno_por}` : ''}<br />
           Equipe: {d.engine.equipe?.funcionarios} de meta {d.engine.equipe?.meta}, próxima revisão em {d.engine.equipe?.proxima_revisao_em_turnos} turnos<br />
+          Loja: {d.lojaStatus ? (d.lojaStatus.aberta ? 'aberta' : 'fechada') : '…'} ({d.lojaStatus?.motivo || 'verificando'})<br />
           Ferramentas: {d.engine.isolamento_ferramentas?.ligadas ? 'ligadas' : 'desligadas'} ({d.engine.isolamento_ferramentas?.motivo || 'não verificado'})</p>}
         <Office employees={d.emps} selected={sel} onSelect={setSel} reduced={reduced} />
         <p className="note">Ações (escrever, pesquisar, conversar, reunião, contratar, demitir) vêm do banco. Quem está parado passeia pela copa e pelo corredor: isso é só animação de ambiente.</p>
@@ -147,9 +148,8 @@ export default function App() {
       {tab === 2 && <ul className="feed">{d.prods.map((p) => (
         <li key={p.id}><b>{p.name}</b> <small>({p.status}{p.price_cents ? ` · ${brl(p.price_cents / 100)}` : ' · sem preço'})</small><br /><b>{p.secoes_total > 0 ? `${p.secoes_prontas} de ${p.secoes_total} seções` : 'sem plano de seções'}, {p.caracteres} caracteres</b><br />{p.description}
           {(() => { const l = d.loja.find((x) => x.id === p.id); if (!l) return null;
-            return <p className="note">Loja: {l.publicado ? <a href={l.url} target="_blank" rel="noreferrer">publicada ({l.url})</a>
-              : p.status !== 'pronto' ? 'o produto ainda não está pronto'
-              : !l.tem_texto ? 'falta o texto de venda' : !p.price_cents ? 'falta o preço' : 'falta a identificação do vendedor (nome e e-mail)'}</p>; })()}
+            return <p className="note">Loja: {l.publicado ? <a href={l.url} target="_blank" rel="noreferrer">página publicada</a> : 'página ainda não publicada'}
+              {' · '}{l.aberto ? 'à venda' : `compra fechada: ${l.motivo}`}</p>; })()}
           {p.content && <details><summary>Ver conteúdo</summary><pre style={{ whiteSpace: 'pre-wrap' }}>{p.content}</pre></details>}</li>))}
         {!d.prods.length && <li className="note">Nenhum produto ainda.</li>}</ul>}
 

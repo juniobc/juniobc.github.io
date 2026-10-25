@@ -140,7 +140,7 @@ def test_migrations_idempotent_and_clean_old_empty_usage(url, monkeypatch):
     c.execute("INSERT INTO employees(slug,name,role,area,instructions,model) VALUES ('a','A','CEO','D','x','m'),('b','B','CEO','D','x','m')")
     c.execute("INSERT INTO usage_log(employee_id,model,prompt_tokens,completion_tokens) SELECT id,'m',100,3500 FROM employees, generate_series(1,2)")
     c.execute("INSERT INTO messages(from_id,body) SELECT id,'oi' FROM employees WHERE slug='b'")
-    assert migrate.migrate(c) == ["002_zera_uso_vazio.sql", "003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql", "010_loja.sql", "011_oportunidades.sql", "012_equipe_paralelo.sql", "013_pedidos.sql"]
+    assert migrate.migrate(c) == [f.name for f in sorted(migrate.DIR.glob("*.sql")) if f.name >= "002"]
     assert migrate.migrate(c) == []
     ok = c.execute("SELECT e.slug FROM usage_log u JOIN employees e ON e.id=u.employee_id WHERE u.ok GROUP BY 1").fetchall()
     assert [r["slug"] for r in ok] == ["b"]  # b tem mensagem gravada: chamadas dele eram úteis
@@ -214,7 +214,7 @@ def test_migration_003_cleans_duplicates(url, monkeypatch):
         c.execute("INSERT INTO products(name,file_path) VALUES ('Toolkit X','a.txt')")
         c.execute("INSERT INTO tasks(title) VALUES ('Pesquisar copy')")
     c.execute("INSERT INTO tasks(title,details) VALUES ('Receber fontes','mandar os arquivos .txt fonte')")
-    assert migrate.migrate(c) == ["003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql", "010_loja.sql", "011_oportunidades.sql", "012_equipe_paralelo.sql", "013_pedidos.sql"]
+    assert migrate.migrate(c) == [f.name for f in sorted(migrate.DIR.glob("*.sql")) if f.name >= "003"]
     assert c.execute("SELECT COUNT(*) AS n FROM products").fetchone()["n"] == 1
     assert c.execute("SELECT COUNT(*) AS n FROM tasks WHERE status='open'").fetchone()["n"] == 1
 
@@ -403,7 +403,7 @@ def test_migration_006_archives_existing_messages(url, monkeypatch):
     for f in files[:5]:
         c.execute(f.read_text()); c.execute("INSERT INTO schema_migrations(name) VALUES (%s)", (f.name,))
     c.execute("INSERT INTO messages(body) VALUES ('velha 1'),('velha 2')")
-    assert migrate.migrate(c) == ["006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql", "010_loja.sql", "011_oportunidades.sql", "012_equipe_paralelo.sql", "013_pedidos.sql"]
+    assert migrate.migrate(c) == [f.name for f in sorted(migrate.DIR.glob("*.sql")) if f.name >= "006"]
     c.execute("INSERT INTO messages(body) VALUES ('nova')")
     assert [r["body"] for r in c.execute("SELECT body FROM messages WHERE NOT archived").fetchall()] == ["nova"]
 
@@ -747,7 +747,7 @@ def test_migration_009_supersedes_old_owner_requests(url, monkeypatch):
         c.execute(f.read_text()); c.execute("INSERT INTO schema_migrations(name) VALUES (%s)", (f.name,))
     c.execute("INSERT INTO owner_requests(body) VALUES ('Produto Toolkit pronto, preciso que o Junio publique no marketplace'),('Abrir conta na Hotmart com CPF')")
     c.execute("INSERT INTO owner_requests(body,done) VALUES ('antigo já feito',true)")
-    assert migrate.migrate(c) == ["009_vendas_no_servidor.sql", "010_loja.sql", "011_oportunidades.sql", "012_equipe_paralelo.sql", "013_pedidos.sql"]
+    assert migrate.migrate(c) == [f.name for f in sorted(migrate.DIR.glob("*.sql")) if f.name >= "009"]
     rows = c.execute("SELECT done,resolution FROM owner_requests ORDER BY id").fetchall()
     assert all(r["done"] for r in rows)
     assert [r["resolution"] for r in rows[:2]] == ["substituído: as vendas passam a ser feitas no próprio servidor, com Mercado Pago"] * 2
@@ -1419,6 +1419,7 @@ def shop(conn, tmp_path, monkeypatch):
     (tmp_path / "segredos" / "mp-token").write_text(TOKEN)
     monkeypatch.setattr(ss, "_state", {"fp": None, "last": 0.0})
     monkeypatch.setattr(ss, "verify", lambda t: ("ok", "token aceito pelo Mercado Pago"))
+    ss.refresh_meta(force=True)                                                # token verificado, como o motor faria a cada 60 s
     fake = FakeMP()
     monkeypatch.setattr(payments, "mp_request", fake)
     c = _client(conn, monkeypatch)
@@ -1429,6 +1430,12 @@ def shop(conn, tmp_path, monkeypatch):
     s.product = store.published(conn)[0]
     s.order = lambda: payments.create_order(conn, s.product)
     s.pay = lambda order, pid="1001", **kw: fake.payments.__setitem__(str(pid), mp_payment(pid, order["id"], **kw))
+    def approve():
+        from meridiano.engine import tools
+        pres = conn.execute("SELECT * FROM employees WHERE slug='presidente'").fetchone()
+        out = tools.run_tool(conn, pres, "approve_store_page", {"product_name": "Copy de Vendas", "note": "Conferi cada promessa contra as 8 seções do produto: tudo confere."})
+        assert "aprovada" in out, out
+    s.approve = approve
     s.webhook = lambda pid="1001", **kw: c.post(f"/api/mp/webhook?data.id={pid}&type=payment", json={"type": "payment", "data": {"id": str(pid)}}, **kw)
     return s
 
@@ -1604,18 +1611,17 @@ def test_second_payment_for_the_same_order_is_flagged_not_hidden(conn, shop):
     assert "reembolso manual" in conn.execute("SELECT note FROM payment_events WHERE outcome='pagamento_duplicado'").fetchone()["note"]
 
 
-def test_checkout_is_off_until_delivery_exists_and_charges_no_one(conn, shop, monkeypatch):
-    from meridiano.engine import store
-    assert store.DELIVERY_READY is False
+def test_checkout_stays_closed_until_the_president_approves_and_charges_no_one(conn, shop):
     r = shop.client.post("/pub/loja/copy-de-vendas/comprar", follow_redirects=False)
     assert r.status_code == 503 and conn.execute("SELECT COUNT(*) AS n FROM orders").fetchone()["n"] == 0
     assert shop.fake.calls == []
-    assert "Comprar" not in shop.client.get("/pub/loja/copy-de-vendas/").text
+    page = shop.client.get("/pub/loja/copy-de-vendas/").text
+    assert "Comprar" not in page and "Pagamento em breve" in page
 
 
 def test_checkout_creates_order_and_preference_and_redirects(conn, shop, monkeypatch):
     from meridiano.engine import store, config
-    monkeypatch.setattr(store, "DELIVERY_READY", True)
+    shop.approve()
     page = shop.client.get("/pub/loja/copy-de-vendas/").text
     assert 'action="/pub/loja/copy-de-vendas/comprar"' in page and "Comprar agora" in page
     r = shop.client.post("/pub/loja/copy-de-vendas/comprar", follow_redirects=False)
@@ -1633,8 +1639,8 @@ def test_checkout_creates_order_and_preference_and_redirects(conn, shop, monkeyp
 
 
 def test_checkout_failures_are_safe(conn, shop, monkeypatch):
-    from meridiano.engine import store, config
-    monkeypatch.setattr(store, "DELIVERY_READY", True)
+    from meridiano.engine import store, config, secrets_store as ss
+    shop.approve()
     shop.fake.pref = (500, {})
     r = shop.client.post("/pub/loja/copy-de-vendas/comprar", follow_redirects=False)
     assert r.status_code == 502 and "Nada foi cobrado" in r.text and "mercadopago" not in r.text.lower()
@@ -1644,6 +1650,8 @@ def test_checkout_failures_are_safe(conn, shop, monkeypatch):
     assert shop.client.post("/pub/loja/nao-existe/comprar", follow_redirects=False).status_code == 404
     shop.fake.pref = (201, {"id": "P", "init_point": "https://www.mercadopago.com.br/x", "sandbox_init_point": "https://sandbox.mercadopago.com.br/x"})
     (shop.secdir / "mp-token").write_text("TEST-" + "x1y2z3w4" * 5)                                    # token de teste vai para o sandbox
+    assert shop.client.post("/pub/loja/copy-de-vendas/comprar", follow_redirects=False).status_code == 503   # token trocado: ainda não verificado
+    ss.refresh_meta(force=True)
     r = shop.client.post("/pub/loja/copy-de-vendas/comprar", follow_redirects=False)
     assert r.status_code == 303 and r.headers["location"].startswith("https://sandbox.")
     assert conn.execute("SELECT test FROM orders ORDER BY id DESC").fetchone()["test"] is True
@@ -1693,3 +1701,224 @@ def test_no_agent_tool_can_touch_money_or_orders():
     from meridiano.engine import tools
     names = {s["name"] for s in tools.SPECS}
     assert not any(k in n for n in names for k in ("cash", "ledger", "money", "order", "pedido", "payment", "refund", "sale"))
+
+
+# ---------- entrega, revisão da Presidente e abertura da loja (etapa 4) ----------
+
+def _pdf_ok(data):
+    """Estrutura mínima de PDF válida: cabeçalho, xref apontando para os objetos certos e EOF."""
+    assert data.startswith(b"%PDF-1.4") and data.rstrip().endswith(b"%%EOF")
+    sx = int(data.rsplit(b"startxref", 1)[1].split()[0])
+    assert data[sx:sx + 4] == b"xref"
+    n = int(data[sx:].split(b"\n")[1].split()[1])
+    entries = data[sx:].split(b"\n")[2:2 + n]
+    for i, ent in enumerate(entries[1:], 1):
+        off = int(ent.split()[0])
+        assert data[off:].startswith(b"%d 0 obj" % i), (i, off)
+    return n
+
+
+def test_pdf_is_valid_keeps_accents_bullets_and_paginates():
+    from meridiano.engine.pdf import render_pdf
+    md = "## 1. Introdução\n\nAção, coração, é, ç, ü. Preço R$ 29,90 (parênteses) e \\ barra.\n\n- item um\n- item dois\n\n### Sub\n\n" + ("Parágrafo longo de teste. " * 60 + "\n\n") * 12
+    pdf = render_pdf("Copy de Vendas", md, footer="Pedido #7 · uso pessoal")
+    objs = _pdf_ok(pdf)
+    assert objs > 8                                                          # várias páginas
+    try:
+        import pypdf, io
+    except ImportError:
+        return
+    r = pypdf.PdfReader(io.BytesIO(pdf))
+    first, last = r.pages[0].extract_text(), r.pages[-1].extract_text()
+    assert "Copy de Vendas" in first and "Introdução" in first and "ação, coração" in first.lower() and "• item um" in first and "R$ 29,90 (parênteses)" in first
+    assert f"página {len(r.pages)} de {len(r.pages)}" in last and "Pedido #7 · uso pessoal" in last
+
+
+def test_store_gate_names_the_exact_missing_item(conn, shop, monkeypatch):
+    from meridiano.engine import store, secrets_store as ss, tools
+    pres = conn.execute("SELECT * FROM employees WHERE slug='presidente'").fetchone()
+    ceo = conn.execute("SELECT * FROM employees WHERE slug='ceo'").fetchone()
+    motivo = lambda: store.store_status(conn)["produtos"][2]
+    st = store.store_status(conn)
+    assert st["aberta"] is False and "revisão da Presidente pendente" in st["motivo"]
+    # token ausente / não verificado / trocado
+    (shop.secdir / "mp-token").write_text("TEST-" + "x1y2z3w4" * 5)
+    assert "ainda não foi verificado" in store.store_status(conn)["motivo"]
+    ss.refresh_meta(force=True)
+    (shop.secdir / "mp-token").unlink()
+    assert "falta o token do Mercado Pago" in store.store_status(conn)["motivo"]
+    (shop.secdir / "mp-token").write_text(TOKEN); ss.refresh_meta(force=True)
+    # vendedor sem identificação
+    conn.execute("DELETE FROM store_settings")
+    assert store.store_status(conn)["aberta"] is False and store.store_status(conn)["motivo"] != "1 produto(s) à venda"
+    conn.execute("INSERT INTO store_settings(key,value) VALUES ('seller_name','Junio Teste'),('contact_email','junio@example.com')")
+    # autor não revisa o próprio texto; o CEO escreveu, a Presidente revisa
+    assert tools.run_tool(conn, ceo, "approve_store_page", {"product_name": "Copy de Vendas", "note": "Conferi tudo contra o produto, está certo."}).startswith("erro: só a Presidente revisa")
+    # se a PRESIDENTE escreveu o texto, ela não o aprova e o CEO passa a poder revisar
+    conn.execute("UPDATE product_store SET written_by=%s", (pres["id"],))
+    assert "quem escreveu o texto não pode" in tools.run_tool(conn, pres, "approve_store_page", {"product_name": "Copy de Vendas", "note": "Conferi tudo contra o produto, está certo."})
+    assert "aprovada" in tools.run_tool(conn, ceo, "approve_store_page", {"product_name": "Copy de Vendas", "note": "Conferi cada promessa contra as seções do produto, tudo confere."})
+    conn.execute("UPDATE product_store SET written_by=%s, review_status='pendente', approved_hash=NULL, approved_by=NULL", (ceo["id"],))
+    dev = _mk(conn, "Davi", "Analista")
+    assert tools.run_tool(conn, dev, "approve_store_page", {"product_name": "Copy de Vendas", "note": "Conferi tudo contra o produto, está certo."}).startswith("erro: só a Presidente")
+    assert tools.run_tool(conn, pres, "approve_store_page", {"product_name": "Copy de Vendas", "note": "ok"}).startswith("erro: registre o que você conferiu")
+    # devolvida para reescrita: fechada com o motivo
+    assert "reescrita pedida" in tools.run_tool(conn, pres, "request_store_rewrite", {"product_name": "Copy de Vendas", "reason": "a promessa de 3 mil palavras não confere"})
+    assert "pediu reescrita: a promessa de 3 mil palavras" in store.store_status(conn)["motivo"]
+    # aprovada: aberta
+    shop.approve()
+    st = store.store_status(conn)
+    assert st["aberta"] is True and st["motivo"] == "1 produto(s) à venda" and [p["aberto"] for p in st["produtos"]].count(True) == 1
+    # mudou o preço ou o texto depois da aprovação: a aprovação cai
+    tools.run_tool(conn, ceo, "set_price", {"product_name": "Copy de Vendas", "price_brl": 34.9, "reason": "teste de preço"})
+    assert store.store_status(conn)["aberta"] is False and "revisão da Presidente pendente" in store.store_status(conn)["motivo"]
+    shop.approve()
+    assert store.store_status(conn)["aberta"] is True
+    conn.execute("UPDATE product_store SET headline='Outro título qualquer'")                      # mudança por fora do fluxo: o hash não bate
+    assert "mudou depois da aprovação" in store.store_status(conn)["motivo"]
+    c = shop.client
+    assert c.get("/api/store/status", headers={"X-Token": "leitura"}).json()["aberta"] is False
+    assert c.get("/api/store/status").status_code == 401
+    assert "Comprar" not in c.get("/pub/loja/copy-de-vendas/").text
+
+
+def test_president_review_prompt_and_ceo_rewrite_prompt(conn):
+    from meridiano.engine import agent, tools
+    pres = conn.execute("SELECT * FROM employees WHERE slug='presidente'").fetchone() if conn.execute("SELECT 1 FROM employees").fetchone() else None
+    ceo = _open_store(conn)
+    conn.execute("INSERT INTO store_settings(key,value) VALUES ('seller_name','J'),('contact_email','j@e.com') ON CONFLICT DO NOTHING")
+    for n in ("Toolkit do Vendedor E-commerce", "Plano Mestre Financeiro Pessoal"):
+        _ready_product(conn, n)
+        tools.run_tool(conn, ceo, "write_store_copy", dict(GOOD_COPY, product_name=n))
+        tools.run_tool(conn, ceo, "set_price", {"product_name": n, "price_brl": 24.9, "reason": "preço de entrada"})
+    pres = conn.execute("SELECT * FROM employees WHERE slug='presidente'").fetchone()
+    p = agent.build_prompt(conn, pres)
+    assert "espera a SUA revisão" in p and "read_store_page" in p and "approve_store_page" in p and "request_store_rewrite" in p
+    assert "espera a SUA revisão" not in agent.build_prompt(conn, ceo)                       # quem escreveu não é o revisor
+    first = conn.execute("SELECT p.name FROM products p JOIN product_store s ON s.product_id=p.id WHERE s.review_status<>'aprovada' ORDER BY p.id").fetchone()["name"]
+    tools.run_tool(conn, pres, "request_store_rewrite", {"product_name": first, "reason": "o texto promete mais do que o produto tem"})
+    c = agent.build_prompt(conn, ceo)
+    assert "REESCRITA do texto de venda" in c and "o texto promete mais do que o produto tem" in c
+
+
+def test_read_store_page_shows_what_the_customer_sees(conn):
+    from meridiano.engine import tools
+    ceo = _open_store(conn)
+    pres = conn.execute("SELECT * FROM employees WHERE slug='presidente'").fetchone()
+    out = tools.run_tool(conn, pres, "read_store_page", {"product_name": "Copy de Vendas"})
+    assert "R$ 29,90" in out and "Aprenda a escrever textos de venda claros" in out and "Princípios de copy que converte" in out and "[pendente]" in out
+    assert tools.run_tool(conn, pres, "read_store_page", {"product_name": "Toolkit do Vendedor E-commerce"}).startswith("erro: esse produto ainda não tem texto")
+
+
+def _buy_and_pay(shop, conn, pid="1001"):
+    """Compra completa pela loja: clica em Comprar, o MP aprova e avisa pelo webhook. Devolve o pedido."""
+    r = shop.client.post("/pub/loja/copy-de-vendas/comprar", follow_redirects=False)
+    assert r.status_code == 303
+    o = conn.execute("SELECT * FROM orders ORDER BY id DESC").fetchone()
+    shop.pay(o, pid)
+    assert shop.webhook(pid).json()["resultado"] == "venda"
+    return conn.execute("SELECT * FROM orders WHERE id=%s", (o["id"],)).fetchone()
+
+
+def test_full_flow_purchase_cash_link_download_and_refund_revokes(conn, shop):
+    from meridiano.engine import db
+    shop.approve()
+    page = shop.client.get("/pub/loja/copy-de-vendas/").text
+    assert "Comprar agora" in page                                                           # aberta: aprovada + token verificado + vendedor + texto + preço
+    o = _buy_and_pay(shop, conn)
+    assert _ledger(conn) == [("receita", 2990, "mp:1001"), ("despesa", 150, "mp:1001:taxa")] and db.cash_cents(conn) == 2840
+    d = conn.execute("SELECT * FROM downloads").fetchone()
+    assert d["order_id"] == o["id"] and d["max_count"] == 5 and not d["revoked"] and len(d["token"]) >= 30
+    days = conn.execute("SELECT extract(epoch FROM expires_at - now())/86400 AS d FROM downloads").fetchone()["d"]
+    assert 6.99 < float(days) <= 7.0                                                          # 7 dias
+    # a página do pedido mostra os botões (POST, não links) e o prazo
+    pg = shop.client.get(f"/pub/loja/pedido/{o['token']}").text
+    assert "Pagamento confirmado" in pg and f'action="/pub/loja/baixar/{d["token"]}/pdf"' in pg and "5 download(s) restante(s)" in pg and "Baixar Markdown" in pg
+    assert shop.client.get(f"/pub/loja/baixar/{d['token']}/pdf").status_code in (404, 405)    # GET (pré-visualização de link) não entrega nem gasta download
+    assert conn.execute("SELECT count FROM downloads").fetchone()["count"] == 0
+    # baixa o PDF e o Markdown
+    r = shop.client.post(f"/pub/loja/baixar/{d['token']}/pdf")
+    assert r.status_code == 200 and r.headers["content-type"] == "application/pdf" and 'attachment; filename="copy-de-vendas.pdf"' in r.headers["content-disposition"]
+    assert r.headers["x-content-type-options"] == "nosniff" and r.headers["cache-control"] == "no-store"
+    _pdf_ok(r.content)
+    try:
+        import pypdf, io
+        txt = "".join(p.extract_text() for p in pypdf.PdfReader(io.BytesIO(r.content)).pages)
+        assert "Copy de Vendas" in txt and "Princípios de copy que converte" in txt and f"Pedido #{o['id']}" in txt and "Material educativo" in txt
+    except ImportError:
+        pass
+    m = shop.client.post(f"/pub/loja/baixar/{d['token']}/md")
+    assert m.status_code == 200 and m.headers["content-type"].startswith("text/markdown") and "## 1. Princípios de copy que converte" in m.text and f"Pedido #{o['id']}" in m.text
+    assert conn.execute("SELECT count FROM downloads").fetchone()["count"] == 2
+    # limite de 5: mais três funcionam, o sexto não
+    codes = [shop.client.post(f"/pub/loja/baixar/{d['token']}/md").status_code for _ in range(4)]
+    assert codes == [200, 200, 200, 410]
+    assert "Os downloads deste link acabaram" in shop.client.post(f"/pub/loja/baixar/{d['token']}/pdf").text
+    assert "Os downloads deste link acabaram" in shop.client.get(f"/pub/loja/pedido/{o['token']}").text and "junio@example.com" in shop.client.get(f"/pub/loja/pedido/{o['token']}").text
+    # reembolso revoga o link (mesmo com downloads sobrando) e a página explica
+    conn.execute("UPDATE downloads SET count=0")
+    shop.pay(o, "1001", status="refunded"); assert shop.webhook("1001").json()["resultado"] == "reembolso"
+    assert conn.execute("SELECT revoked FROM downloads").fetchone()["revoked"] is True
+    r = shop.client.post(f"/pub/loja/baixar/{d['token']}/pdf")
+    assert r.status_code == 410 and "acesso a este material foi encerrado" in r.text
+    assert "reembolsado" in shop.client.get(f"/pub/loja/pedido/{o['token']}").text.lower()
+
+
+def test_chargeback_also_revokes_and_partial_refund_does_not(conn, shop):
+    shop.approve()
+    o = _buy_and_pay(shop, conn)
+    d = conn.execute("SELECT token FROM downloads").fetchone()["token"]
+    shop.pay(o, "1001", transaction_amount_refunded=5.0); shop.webhook("1001")
+    assert shop.client.post(f"/pub/loja/baixar/{d}/md").status_code == 200                     # reembolso parcial não tira o acesso
+    shop.pay(o, "1001", status="charged_back"); shop.webhook("1001")
+    assert shop.client.post(f"/pub/loja/baixar/{d}/md").status_code == 410
+
+
+def test_download_expiry_invalid_tokens_and_unpaid_orders(conn, shop):
+    shop.approve()
+    o = _buy_and_pay(shop, conn)
+    d = conn.execute("SELECT token FROM downloads").fetchone()["token"]
+    conn.execute("UPDATE downloads SET expires_at = now() - interval '1 minute'")
+    r = shop.client.post(f"/pub/loja/baixar/{d}/pdf")
+    assert r.status_code == 410 and "link expirou" in r.text
+    assert "O link expirou" in shop.client.get(f"/pub/loja/pedido/{o['token']}").text
+    for bad in ("curto", "x" * 80, "../../etc/passwd", "nao-existe-nao-existe-nao-existe"):
+        assert shop.client.post(f"/pub/loja/baixar/{bad}/pdf").status_code in (404, 405, 410)
+    assert shop.client.post(f"/pub/loja/baixar/{d}/exe").status_code == 404                   # formato desconhecido
+    # um pedido que não está pago nunca entrega, mesmo se existir uma linha de download
+    conn.execute("UPDATE downloads SET expires_at = now() + interval '7 days'")
+    conn.execute("UPDATE orders SET status='aguardando'")
+    assert shop.client.post(f"/pub/loja/baixar/{d}/pdf").status_code == 410
+
+
+def test_parallel_downloads_never_exceed_the_limit(conn, shop):
+    from meridiano.engine import delivery, db
+    shop.approve()
+    _buy_and_pay(shop, conn)
+    d = conn.execute("SELECT token FROM downloads").fetchone()["token"]
+    conn.execute("UPDATE downloads SET count=4")                                             # sobra 1 download
+    conns = [db.connect() for _ in range(8)]
+    res = []
+    _threads(8, lambda i: res.append(delivery.claim(conns[i], d, "pdf")[1]))
+    assert res.count("ok") == 1 and res.count("esgotado") == 7
+    assert conn.execute("SELECT count FROM downloads").fetchone()["count"] == 5
+
+
+def test_sandbox_purchase_delivers_but_never_reaches_the_cash_book(conn, shop):
+    from meridiano.engine import secrets_store as ss
+    shop.approve()
+    (shop.secdir / "mp-token").write_text("TEST-" + "x1y2z3w4" * 5); ss.refresh_meta(force=True)
+    r = shop.client.post("/pub/loja/copy-de-vendas/comprar", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"].startswith("https://sandbox.")
+    o = conn.execute("SELECT * FROM orders").fetchone()
+    shop.pay(o, "1001", live_mode=False); assert shop.webhook("1001").json()["resultado"] == "venda_teste"
+    assert _ledger(conn) == []
+    d = conn.execute("SELECT token FROM downloads").fetchone()["token"]
+    assert shop.client.post(f"/pub/loja/baixar/{d}/pdf").status_code == 200                  # o dono consegue testar o fluxo inteiro
+
+
+def test_second_payment_does_not_issue_a_second_link(conn, shop):
+    shop.approve()
+    o = _buy_and_pay(shop, conn)
+    shop.pay(o, "1002"); assert shop.webhook("1002").json()["resultado"] == "pagamento_duplicado"
+    assert conn.execute("SELECT COUNT(*) AS n FROM downloads").fetchone()["n"] == 1

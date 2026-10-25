@@ -34,6 +34,14 @@ def production_block(conn, me):
     if not target:
         falta = conn.execute("SELECT p.name, (s.product_id IS NULL) AS sem_texto, (p.price_cents IS NULL) AS sem_preco FROM products p "
                              "LEFT JOIN product_store s ON s.product_id=p.id WHERE p.status='pronto' AND (s.product_id IS NULL OR p.price_cents IS NULL) ORDER BY p.id").fetchone()
+        rev = conn.execute("SELECT p.name, s.review_status, s.review_note, s.written_by FROM products p JOIN product_store s ON s.product_id=p.id "
+                           "WHERE p.status='pronto' AND p.price_cents IS NOT NULL AND s.review_status<>'aprovada' ORDER BY p.id").fetchone()
+        if rev and rev["review_status"] == "reescrever":
+            return (f"LOJA (prioridade): a Presidente pediu REESCRITA do texto de venda de '{rev['name']}': {rev['review_note']}. Reescreva AGORA com write_store_copy, "
+                    "corrigindo exatamente isso e usando só o que o produto contém (confira com read_product).\n" + "\n".join(lines))
+        if not falta and rev and tools.re.search(r"presidente", me["role"], tools.re.I) and rev["written_by"] != me["id"]:
+            return (f"LOJA (prioridade): a página de '{rev['name']}' espera a SUA revisão para a compra abrir. Leia com read_store_page e confira cada promessa contra as seções do produto "
+                    "(read_product). Se estiver honesta e clara, aprove com approve_store_page (diga o que conferiu); se não, devolva com request_store_rewrite e o motivo.\n" + "\n".join(lines))
         if falta and falta["sem_texto"]:
             return (f"LOJA (prioridade): '{falta['name']}' está pronto mas não tem texto de venda. Escreva AGORA com write_store_copy: título forte, subtítulo, "
                     "apresentação, 3 a 7 benefícios reais, para quem é e 2 a 6 perguntas frequentes. Seja honesto: sem promessa de ganho, sem 'garantido', sem '100%'. "
@@ -41,7 +49,7 @@ def production_block(conn, me):
         if falta and falta["sem_preco"]:
             return (f"LOJA (prioridade): '{falta['name']}' tem texto de venda mas falta o preço. Presidente ou CEO: defina AGORA com set_price "
                     "(mínimo R$ 9,00; para guias deste tamanho, entre R$ 19 e R$ 49), com o motivo em uma frase.\n" + "\n".join(lines))
-        return "PRODUÇÃO: todos os produtos estão na loja. Revise textos fracos com request_rewrite ou escreva conteúdo de blog/SEO útil para atrair leitores.\n" + "\n".join(lines)
+        return "PRODUÇÃO: todos os produtos estão na loja. Revise textos fracos com request_rewrite ou escreva conteúdo de blog/SEO útil para atrair leitores. A compra de cada um só abre depois da revisão da Presidente.\n" + "\n".join(lines)
     name, s = target
     todo = f"Escreva AGORA a seção {s['position']} ('{s['title']}') de '{name}' com write_section: seção COMPLETA, no mínimo {config.MIN_SECTION_WORDS} palavras, em português, útil e original, sem pedir nada a ninguém."
     if s["needs_rewrite"]:

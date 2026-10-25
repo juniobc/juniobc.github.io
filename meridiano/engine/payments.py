@@ -13,7 +13,7 @@ import time
 
 import httpx
 
-from . import config, secrets_store
+from . import config, delivery, secrets_store
 
 MP_API = "https://api.mercadopago.com"
 TERMINAL_REFUND = ("refunded", "charged_back")
@@ -173,6 +173,8 @@ def process_payment(conn, payment_id, fetch=None):
                     _ledger(conn, "receita", gross, desc, f"mp:{pid}")
                     if fee:
                         _ledger(conn, "despesa", fee, f"Taxa do Mercado Pago · {desc}", f"mp:{pid}:taxa")
+                if not duplicate:
+                    delivery.issue(conn, oid)    # o link de download nasce junto com a venda
                 outcome = "pagamento_duplicado" if duplicate else ("venda_teste" if test else "venda")
                 _event(conn, pid, oid, status, outcome, "segundo pagamento aprovado para o mesmo pedido: precisa de reembolso manual" if duplicate else "")
             # 2) o reembolso, lançado pela DIFERENÇA do que já foi devolvido (reembolsos parciais sucessivos não contam em dobro)
@@ -186,6 +188,8 @@ def process_payment(conn, payment_id, fetch=None):
                 already = conn.execute("SELECT 1 FROM ledger WHERE external_ref=%s", (f"mp:{pid}:{kind_ref}",)).fetchone() is not None
                 if main:
                     new_status = "chargeback" if status == "charged_back" else ("reembolsado" if full else cur["status"])
+                    if full:
+                        delivery.revoke(conn, oid)    # reembolso total ou chargeback encerra o acesso
                     if cur["status"] == new_status and cur["refunded_cents"] >= target:
                         return {"outcome": outcome, "order_id": oid}          # este reembolso já foi aplicado
                     delta = target - cur["refunded_cents"]

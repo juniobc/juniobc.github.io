@@ -1,4 +1,5 @@
 """Loja pública: gera páginas estáticas (sem JavaScript) a partir do banco. Todo texto de agente é escapado."""
+import hashlib
 import html
 import json
 import re
@@ -68,22 +69,75 @@ def published(conn):
     if not store_ready(conn):
         return []
     rows = conn.execute(
-        "SELECT p.id,p.name,p.description,p.price_cents,p.legal_note,s.slug,s.headline,s.subtitle,s.pitch,s.benefits,s.audience,s.faq "
+        "SELECT p.id,p.name,p.description,p.price_cents,p.legal_note,s.slug,s.headline,s.subtitle,s.pitch,s.benefits,s.audience,s.faq,s.review_status,s.review_note,s.approved_hash,s.written_by "
         "FROM products p JOIN product_store s ON s.product_id=p.id WHERE p.status='pronto' AND p.price_cents>=%s ORDER BY p.id", (MIN_PRICE_CENTS,)).fetchall()
-    for r in rows:   # listas guardadas como texto JSON
-        r["benefits"] = json.loads(r["benefits"])
-        r["faq"] = json.loads(r["faq"])
-    return rows
+    return [_parse_lists(r) for r in rows]   # listas guardadas como texto JSON
 
 
-# O botão de compra só liga quando o cliente consegue RECEBER o produto depois de pagar. A entrega por link (próxima etapa)
-# vira esta chave para True; até lá ninguém paga e fica sem receber.
-DELIVERY_READY = False
+# O botão de compra só abre quando o cliente consegue PAGAR e RECEBER: entrega pronta, token do Mercado Pago verificado,
+# vendedor identificado, texto de venda, preço e a revisão da Presidente sobre ESSA versão da página.
+DELIVERY_READY = True   # ligado depois de existir e estar testado o fluxo completo (compra, caixa, link, download, reembolso revoga)
 
 
-def checkout_available(conn):
+def page_hash(p):
+    """Impressão digital do que o cliente vê e paga: se o texto ou o preço mudam, a aprovação deixa de valer."""
+    blob = json.dumps([p["headline"], p["subtitle"], p["pitch"], p["benefits"], p["audience"], p["faq"], p["price_cents"]], ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def _parse_lists(r):
+    for k in ("benefits", "faq"):
+        if isinstance(r.get(k), str):
+            r[k] = json.loads(r[k])
+    return r
+
+
+def sale_state(conn, p):
+    """(aberto, motivo) para um produto com texto de venda. Qualquer item faltando mantém 'Pagamento em breve'."""
     from . import secrets_store
-    return DELIVERY_READY and secrets_store.configured()
+    if not DELIVERY_READY:
+        return False, "a entrega do produto ainda está desligada"
+    st = secrets_store.status()   # só lê arquivos (sem rede): a reverificação roda no motor (60 s) e ao consultar o status no painel
+    if not st["configurado"]:
+        return False, "falta o token do Mercado Pago"
+    if not st["verificado"]:
+        return False, "o token do Mercado Pago ainda não foi verificado"
+    if not store_ready(conn):
+        return False, "falta a identificação do vendedor (nome e e-mail)"
+    if not p.get("headline"):
+        return False, "falta o texto de venda"
+    if not p.get("price_cents") or p["price_cents"] < MIN_PRICE_CENTS:
+        return False, "falta o preço"
+    if p.get("review_status") == "reescrever":
+        return False, "a Presidente pediu reescrita: " + (p.get("review_note") or "")[:120]
+    if p.get("review_status") != "aprovada":
+        return False, "revisão da Presidente pendente"
+    if p.get("approved_hash") != page_hash(p):
+        return False, "o texto ou o preço mudou depois da aprovação: nova revisão da Presidente"
+    return True, "à venda"
+
+
+def store_status(conn):
+    """Para o painel: loja aberta ou fechada, com o motivo, e o estado de cada produto."""
+    rows = conn.execute("SELECT p.id,p.name,p.status,p.price_cents,s.slug,s.headline,s.subtitle,s.pitch,s.benefits,s.audience,s.faq,s.review_status,s.review_note,s.approved_hash,"
+                        "(SELECT COUNT(*) FROM product_sections x WHERE x.product_id=p.id AND x.content<>'' AND NOT x.needs_rewrite) AS feitas,"
+                        "(SELECT COUNT(*) FROM product_sections x WHERE x.product_id=p.id) AS total "
+                        "FROM products p LEFT JOIN product_store s ON s.product_id=p.id ORDER BY p.id").fetchall()
+    out = []
+    for r in rows:
+        _parse_lists(r)
+        if r["status"] != "pronto":
+            aberto, motivo = False, f"o produto ainda está em produção ({r['feitas']} de {r['total']} seções)" if r["total"] else "o produto ainda não está pronto"
+        else:
+            aberto, motivo = sale_state(conn, r)
+        out.append({"id": r["id"], "nome": r["name"], "aberto": aberto, "motivo": motivo, "slug": r["slug"]})
+    abertos = [x for x in out if x["aberto"]]
+    if abertos:
+        motivo = f"{len(abertos)} produto(s) à venda"
+    else:   # o motivo do produto mais adiantado (o que tem texto de venda, senão o primeiro)
+        mais = next((x for x in out if x["slug"]), out[0] if out else None)
+        motivo = mais["motivo"] if mais else "nenhum produto ainda"
+    return {"aberta": bool(abertos), "motivo": motivo, "produtos": out}
 
 
 def _page(title, body, nonce, desc="", refresh=0):
@@ -119,7 +173,7 @@ def render_product(conn, slug, nonce):
     sumario = "".join(f"<li>{e(x['title'])}</li>" for x in secs)
     benef = "".join(f"<li>{e(b)}</li>" for b in p["benefits"])
     faq = "".join(f"<details><summary>{e(str(i['q']))}</summary><p>{e(str(i['a']))}</p></details>" for i in p["faq"])
-    if checkout_available(conn):
+    if sale_state(conn, p)[0]:
         buy = f'<form method="post" action="/pub/loja/{e(p["slug"], quote=True)}/comprar"><button class="btn" type="submit">Comprar agora</button></form>'
     else:
         buy = '<span class="soon">Pagamento em breve</span>'

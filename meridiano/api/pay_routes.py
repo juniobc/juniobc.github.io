@@ -4,7 +4,11 @@ import re
 from fastapi import APIRouter, Body, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from ..engine import db, payments, secrets_store, store
+import html as _html_mod
+
+from fastapi import Response
+
+from ..engine import db, delivery, payments, secrets_store, store
 
 router = APIRouter()
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,79}$")
@@ -30,7 +34,8 @@ def comprar(slug: str):
         product = next((p for p in store.published(c) if p["slug"] == slug), None) if SLUG_RE.match(slug) else None
         if not product:
             return _msg("Produto não encontrado", "Este produto não está à venda.", 404)
-        if not store.checkout_available(c):
+        aberto, _motivo = store.sale_state(c, product)   # o motivo é para o painel, não para o cliente
+        if not aberto:
             return _msg("Pagamento em breve", "O pagamento online ainda não está disponível. Nada foi cobrado. Volte em breve.", 503)
         order = payments.create_order(c, product)
         if not order:
@@ -40,6 +45,42 @@ def comprar(slug: str):
             c.execute("UPDATE orders SET status='cancelado', updated_at=now() WHERE id=%s", (order["id"],))
             return _msg("Não foi possível abrir o pagamento", "Nada foi cobrado. Tente de novo em instantes.", 502)
         return RedirectResponse(url, status_code=303)
+    finally:
+        c.close()
+
+
+def _delivery_html(c, order_token):
+    """Botões de download (POST, para que pré-visualizadores de links não gastem downloads) ou o motivo de não haver."""
+    o = c.execute("SELECT id,status FROM orders WHERE token=%s", (order_token,)).fetchone()
+    if not o or o["status"] != "pago":
+        return ""
+    d = delivery.link_for_order(c, o["id"])
+    s = store.get_settings(c)
+    contato = f'Fale com o vendedor: <a href="mailto:{_html_mod.escape(s.get("contact_email", ""), quote=True)}">{_html_mod.escape(s.get("contact_email", ""))}</a>.'
+    if not d:
+        return f"<p>Seu acesso está sendo preparado. Esta página se atualiza sozinha.</p><p>{contato}</p>"
+    if d["state"] != "valido":
+        motivo = {"revogado": "O acesso foi encerrado.", "expirado": "O link expirou.", "esgotado": "Os downloads deste link acabaram."}[d["state"]]
+        return f"<h2>Download</h2><p>{motivo} {contato}</p>"
+    forms = "".join(f'<form method="post" action="/pub/loja/baixar/{d["token"]}/{f}" style="display:inline-block;margin:0 8px 8px 0"><button class="btn" type="submit">Baixar {label}</button></form>'
+                    for f, label in (("pdf", "PDF"), ("md", "Markdown")))
+    return (f"<h2>Seu material</h2><p>{forms}</p><p>Válido até {d['expires_at'].strftime('%d/%m/%Y')} · {d['left']} download(s) restante(s). "
+            f"Guarde o arquivo: o link é só seu e não pode ser compartilhado.</p><p>{contato}</p>")
+
+
+@router.post("/pub/loja/baixar/{dl_token}/{fmt}")
+def baixar(dl_token: str, fmt: str):
+    """Entrega o arquivo. Cada clique consome um dos 5 downloads, de forma atômica; reembolso e chargeback revogam."""
+    c = db.connect()
+    try:
+        order, motivo = delivery.claim(c, dl_token, fmt)
+        if order is None:
+            texto = {"expirado": "Este link expirou.", "esgotado": "Os downloads deste link acabaram.", "revogado": "O acesso a este material foi encerrado."}.get(motivo, "Link inválido.")
+            return _msg("Download indisponível", texto + " Fale com o vendedor pela página da loja.", 410 if motivo != "invalido" else 404)
+        body, nome = delivery.build(order, fmt)
+        return Response(content=body, media_type=delivery.FORMATS[fmt][0], headers={
+            "Content-Disposition": f'attachment; filename="{nome}"', "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store",
+            "Content-Security-Policy": "default-src 'none'; sandbox"})
     finally:
         c.close()
 
@@ -57,7 +98,7 @@ def pedido(token: str, payment_id: str = Query(None)):
             except (payments.PaymentFetchError, OSError, ValueError):
                 pass   # o webhook confirma depois
         n = store.new_nonce()
-        page = store.render_order(c, token, n)
+        page = store.render_order(c, token, n, delivery_html=_delivery_html(c, token))
         if page is None:
             return _msg("Pedido não encontrado", "Confira o endereço.", 404)
         return _html(page, n)
