@@ -40,8 +40,8 @@ def _limit(name, default, old_deploy_default):
 
 
 # modelos são :free; o limite duro só deixa o ritmo lento (SLOW_TICK_SECONDS), nunca para o motor
-DAILY_CALL_LIMIT = _limit("DAILY_CALL_LIMIT", 8000, 2000)          # valores antigos (300, 600, 2000) viram 8000
-DAILY_TOKEN_LIMIT = _limit("DAILY_TOKEN_LIMIT", 8000000, 1500000)  # valores antigos (400000, 1500000) viram 8000000
+DAILY_CALL_LIMIT = _limit("DAILY_CALL_LIMIT", 30000, 8000)         # valores antigos (300, 600, 2000, 8000) viram 30000
+DAILY_TOKEN_LIMIT = _limit("DAILY_TOKEN_LIMIT", 30000000, 8000000) # valores antigos (400000, 1500000, 8000000) viram 30000000
 SLOW_TICK_SECONDS = int(env("SLOW_TICK_SECONDS", "600"))
 TICK_SECONDS = int(env("TICK_SECONDS", "60"))  # um funcionário por minuto, em rodízio
 MAX_TOOL_ROUNDS = int(env("MAX_TOOL_ROUNDS", "5"))
