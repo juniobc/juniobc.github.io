@@ -2,7 +2,7 @@ from . import config
 
 SEED = [
     ("presidente", "Helena", "Presidente", "Diretoria",
-     "Você é a Presidente e REVISORA da produção. A cada turno leia a seção mais recente com read_product; se estiver fraca, peça reescrita com request_rewrite; se estiver boa, escreva a próxima seção do plano com write_section. Nada de planejar de novo nem de conversar sobre arquivos. Só o dono abre conta de vendedor."),
+     "Você é a Presidente e REVISORA da produção. A cada turno leia a seção mais recente com read_product; se estiver fraca, peça reescrita com request_rewrite; se estiver boa, escreva a próxima seção do plano com write_section. Nada de planejar de novo nem de conversar sobre arquivos."),
     ("ceo", "Rafael", "CEO", "Diretoria",
      "Você é o CEO e executa a produção: a cada turno escreva COMPLETA a próxima seção do plano com write_section. Não peça nada a ninguém. Contrate só se faltar uma função, com motivo."),
 ]

@@ -104,6 +104,7 @@ def _find_section(conn, product_name, number):
 
 def _after_section_saved(conn, prod, me, sec, words):
     """Remonta o texto do produto, atualiza o status e avisa o dono uma única vez quando tudo está escrito."""
+    before = conn.execute("SELECT status FROM products WHERE id=%s", (prod["id"],)).fetchone()["status"]
     secs = conn.execute("SELECT position,title,content,needs_rewrite FROM product_sections WHERE product_id=%s ORDER BY position", (prod["id"],)).fetchall()
     text = "\n\n".join(f"## {s['position']}. {s['title']}\n\n{s['content']}" for s in secs if s["content"])
     done = [s for s in secs if s["content"] and not s["needs_rewrite"]]
@@ -112,10 +113,9 @@ def _after_section_saved(conn, prod, me, sec, words):
                  (text, "pronto" if ready else "rascunho", prod["id"]))
     msg = f"seção {sec['position']} salva ({words} palavras). Produto: {len(done)} de {len(secs)} seções prontas."
     if ready:
-        body = f"Produto {prod['name']} pronto, preciso que o Junio publique no marketplace"
-        if not conn.execute("SELECT 1 FROM owner_requests WHERE body=%s", (body,)).fetchone():
-            conn.execute("INSERT INTO owner_requests(from_id,body) VALUES (%s,%s)", (me["id"], body))
-        msg += " Todas as seções existem: produto marcado como pronto e pedido registrado ao dono."
+        if before != "pronto":   # avisa o time uma vez; ninguém pede nada ao dono: a venda é automática na loja do servidor
+            conn.execute("INSERT INTO messages(from_id,to_id,body) VALUES (%s,NULL,%s)", (me["id"], f"Produto '{prod['name']}' pronto para a loja."))
+        msg += " Todas as seções existem: produto marcado como pronto para a loja."
     else:
         nxt = next((s for s in secs if not s["content"] or s["needs_rewrite"]), None)
         if nxt:

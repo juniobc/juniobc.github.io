@@ -5,7 +5,7 @@ import pathlib
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from ..engine import config, db, llm
+from ..engine import config, db, llm, secrets_store
 
 app = FastAPI(title="Meridiano Digital")
 _conn = None
@@ -171,6 +171,25 @@ def owner_requests():
 def owner_request_done(rid: int):
     conn().execute("UPDATE owner_requests SET done=true WHERE id=%s", (rid,))
     return {"ok": True}
+
+
+class MPToken(BaseModel):
+    access_token: str = Field(min_length=10, max_length=400)
+
+
+@app.post("/api/secrets/mp-token", dependencies=[Depends(admin_auth)])
+def set_mp_token(body: MPToken):
+    """Grava o token do Mercado Pago (arquivo 600). Nunca devolve nem registra o token."""
+    ok, msg, meta = secrets_store.save_token(body.access_token)
+    if not ok:
+        raise HTTPException(400, msg)
+    secrets_store.sync_owner_request(conn())
+    return {"configurado": True, "modo": meta["modo"], "verificado": meta["verificado"], "mensagem": msg}
+
+
+@app.get("/api/secrets/mp-token", dependencies=[Depends(read_auth)])
+def mp_token_status():
+    return secrets_store.status()
 
 
 class Entry(BaseModel):

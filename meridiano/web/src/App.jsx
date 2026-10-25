@@ -1,9 +1,42 @@
 import { useEffect, useState } from 'react';
 import Office from './Office.jsx';
-import { api, post, getToken, setToken } from './api.js';
+import { api, post, sendMpToken, getToken, setToken } from './api.js';
 
 const brl = (n) => 'R$ ' + Number(n).toFixed(2).replace('.', ',');
 const TABS = ['Escritório', 'Tarefas', 'Produtos', 'Caixa'];
+const MP_REQUEST = 'Preciso do access token do Mercado Pago';
+
+function MpTokenCard({ onSaved }) {
+  const [admin, setAdmin] = useState('');
+  const [tok, setTok] = useState('');
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+  const send = async () => {
+    setBusy(true); setMsg('');
+    try {
+      const r = await sendMpToken(admin.trim(), tok.trim());
+      setTok(''); setAdmin('');
+      setMsg(`Pronto: token recebido (${r.modo === 'teste' ? 'modo de teste' : 'produção'}${r.verificado ? ', confirmado pelo Mercado Pago' : ', ainda não confirmado'}). Ele não aparece mais aqui.`);
+      onSaved();
+    } catch (e) { setMsg(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <div>
+      <p><b>Preciso do access token do Mercado Pago</b> para receber pagamentos. Você só faz isso uma vez:</p>
+      <ol>
+        <li>Entre em <b>mercadopago.com.br/developers</b> com a sua conta.</li>
+        <li>Vá em <b>Suas integrações</b> e crie uma aplicação (tipo <b>Checkout Pro</b>).</li>
+        <li>Abra <b>Credenciais de produção</b> e copie o <b>Access Token</b> (começa com <code>APP_USR-</code>).</li>
+        <li>Cole abaixo, junto com o token de administrador (quem montou o servidor te passa).</li>
+      </ol>
+      <input type="password" autoComplete="off" placeholder="Token de administrador" value={admin} onChange={(e) => setAdmin(e.target.value)} style={{ width: '100%', marginBottom: 6 }} />
+      <input type="password" autoComplete="off" placeholder="Access Token do Mercado Pago (APP_USR-...)" value={tok} onChange={(e) => setTok(e.target.value)} style={{ width: '100%', marginBottom: 6 }} />
+      <button disabled={busy || !admin || !tok} onClick={send}>{busy ? 'Enviando...' : 'Enviar token com segurança'}</button>
+      {msg && <p className="note">{msg}</p>}
+      <p className="note">O token vai direto para o servidor, é guardado em arquivo protegido e nunca é mostrado de volta. Nenhum agente tem acesso a ele. O Mercado Pago só recebe os pagamentos: sacar o dinheiro continua sendo com você.</p>
+    </div>
+  );
+}
 
 function Login({ onDone, error }) {
   const [v, setV] = useState('');
@@ -69,8 +102,9 @@ export default function App() {
 
       {d.reqs.filter((r) => !r.done).length > 0 && (
         <section className="card"><strong>Pedidos para você, Junio</strong>
-          {d.reqs.filter((r) => !r.done).map((r) => (
-            <p key={r.id}>{r.body} <small>({r.from_name})</small>{' '}
+          {d.reqs.filter((r) => !r.done).map((r) => (r.body.startsWith(MP_REQUEST)
+            ? <MpTokenCard key={r.id} onSaved={() => setNow(Date.now())} />
+            : <p key={r.id}>{r.body} <small>({r.from_name || 'Sistema'})</small>{' '}
               <button onClick={() => post(`owner-requests/${r.id}/done`).catch(() => {})}>Feito</button></p>))}
         </section>)}
 

@@ -1,7 +1,7 @@
 """Loop do motor: um funcionário por turno, em rodízio, em cadência constante."""
 import logging
 import time
-from . import config, db, llm, agent, seed, pacing, plan
+from . import config, db, llm, agent, seed, pacing, plan, secrets_store
 
 log = logging.getLogger("meridiano")
 
@@ -21,6 +21,7 @@ def main():
     seed.seed(conn)
     seed.refresh_instructions(conn)
     plan.ensure(conn)
+    secrets_store.sync_owner_request(conn)
     g = pacing.record_isolation(conn)
     log.info("ferramentas: %s", g["reason"])
     conn.execute("UPDATE employees SET model=%s WHERE model = ANY(%s)", (config.DEFAULT_ROTATION[0], list(config.AVOID)))
@@ -31,6 +32,7 @@ def main():
     while True:
         if time.time() >= next_gate:   # reverifica o isolamento a cada 5 min; qualquer falha desliga as ferramentas
             pacing.record_isolation(conn)
+            secrets_store.sync_owner_request(conn)
             next_gate = time.time() + config.GATE_CHECK_SECONDS
         me = pick(conn, last)
         errored = False

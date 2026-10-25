@@ -13,11 +13,11 @@ Empresa de agentes de IA. Python (motor + API FastAPI), PostgreSQL, React (telas
 Veja `deploy/SETUP.md`. Deploy automático da branch `main` a cada minuto, com migrações (`sql/migrations`), supervisor e rollback. O app escuta em `127.0.0.1:8100`.
 
 ## Registrar uma venda real (só o Junio)
-`curl -X POST .../api/ledger -H "X-Admin-Token: ..." -H 'Content-Type: application/json' -d '{"kind":"receita","amount_cents":4990,"description":"Venda Hotmart #123","external_ref":"HP123"}'`
+`curl -X POST .../api/ledger -H "X-Admin-Token: ..." -H 'Content-Type: application/json' -d '{"kind":"receita","amount_cents":4990,"description":"Venda real #123","external_ref":"PAG123"}'`
 
 ## Pendências
 - `stepfun/step-3.7-flash:free` (erro 400 "missing tags") está fora do rodízio até ser investigado.
-- Webhook de pagamento (Hotmart/Kiwify) ainda não existe: depende de conta de vendedor do Junio.
+- Vendas: a loja e o checkout automático com Mercado Pago (etapas 2 a 6) ainda não existem. Já existe o campo seguro do token (`POST /api/secrets/mp-token`, arquivo 600, nunca devolvido).
 - Testes: `TEST_DATABASE_URL=... pytest meridiano/tests` (ou sem root, sobe Postgres temporário).
 
 

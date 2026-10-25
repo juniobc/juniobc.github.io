@@ -136,7 +136,7 @@ def test_migrations_idempotent_and_clean_old_empty_usage(url, monkeypatch):
     c.execute("INSERT INTO employees(slug,name,role,area,instructions,model) VALUES ('a','A','CEO','D','x','m'),('b','B','CEO','D','x','m')")
     c.execute("INSERT INTO usage_log(employee_id,model,prompt_tokens,completion_tokens) SELECT id,'m',100,3500 FROM employees, generate_series(1,2)")
     c.execute("INSERT INTO messages(from_id,body) SELECT id,'oi' FROM employees WHERE slug='b'")
-    assert migrate.migrate(c) == ["002_zera_uso_vazio.sql", "003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql"]
+    assert migrate.migrate(c) == ["002_zera_uso_vazio.sql", "003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql"]
     assert migrate.migrate(c) == []
     ok = c.execute("SELECT e.slug FROM usage_log u JOIN employees e ON e.id=u.employee_id WHERE u.ok GROUP BY 1").fetchall()
     assert [r["slug"] for r in ok] == ["b"]  # b tem mensagem gravada: chamadas dele eram úteis
@@ -210,7 +210,7 @@ def test_migration_003_cleans_duplicates(url, monkeypatch):
         c.execute("INSERT INTO products(name,file_path) VALUES ('Toolkit X','a.txt')")
         c.execute("INSERT INTO tasks(title) VALUES ('Pesquisar copy')")
     c.execute("INSERT INTO tasks(title,details) VALUES ('Receber fontes','mandar os arquivos .txt fonte')")
-    assert migrate.migrate(c) == ["003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql"]
+    assert migrate.migrate(c) == ["003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql"]
     assert c.execute("SELECT COUNT(*) AS n FROM products").fetchone()["n"] == 1
     assert c.execute("SELECT COUNT(*) AS n FROM tasks WHERE status='open'").fetchone()["n"] == 1
 
@@ -373,8 +373,9 @@ def test_plan_sections_review_and_ready_flow(conn, tmp_path, monkeypatch):
     p = conn.execute("SELECT * FROM products WHERE name='Copy de Vendas'").fetchone()
     assert p["status"] == "pronto" and "## 8." in p["content"]
     tools.run_tool(conn, ceo, "write_section", {"product_name": "Copy de Vendas", "section_number": 3, "content": WORDS(430)})   # reescrever depois de pronto
-    reqs = conn.execute("SELECT body FROM owner_requests").fetchall()
-    assert [r["body"] for r in reqs] == ["Produto Copy de Vendas pronto, preciso que o Junio publique no marketplace"]
+    assert conn.execute("SELECT COUNT(*) AS n FROM owner_requests").fetchone()["n"] == 0        # ninguém pede nada ao dono: a loja vende sozinha
+    avisos = conn.execute("SELECT body FROM messages WHERE body LIKE '%pronto para a loja%'").fetchall()
+    assert [a["body"] for a in avisos] == ["Produto 'Copy de Vendas' pronto para a loja."]       # aviso interno uma única vez
 
 
 def test_archived_messages_stay_out_of_context(conn):
@@ -396,7 +397,7 @@ def test_migration_006_archives_existing_messages(url, monkeypatch):
     for f in files[:5]:
         c.execute(f.read_text()); c.execute("INSERT INTO schema_migrations(name) VALUES (%s)", (f.name,))
     c.execute("INSERT INTO messages(body) VALUES ('velha 1'),('velha 2')")
-    assert migrate.migrate(c) == ["006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql"]
+    assert migrate.migrate(c) == ["006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql"]
     c.execute("INSERT INTO messages(body) VALUES ('nova')")
     assert [r["body"] for r in c.execute("SELECT body FROM messages WHERE NOT archived").fetchall()] == ["nova"]
 
@@ -711,3 +712,108 @@ def test_real_selftest_passes_here_or_skips(gate_on):
     g = sandbox.gate()
     assert g["enabled"] and g["backend"] in ("unshare", "bwrap")
     assert not os.path.exists(os.path.join(os.path.expanduser("~"), ".meridiano_isolation_canary"))   # canário removido
+
+
+# ---------- vendas no servidor: etapa 1 (pedido ao dono e token seguro) ----------
+
+def test_no_prompt_asks_for_marketplaces_or_publishing(conn):
+    from meridiano.engine import agent, plan, seed
+    import re
+    ceo = _ceo(conn)
+    plan.ensure(conn)
+    pres = conn.execute("SELECT * FROM employees WHERE slug='presidente'").fetchone()
+    seed.refresh_instructions(conn)
+    pres = conn.execute("SELECT * FROM employees WHERE slug='presidente'").fetchone()
+    texts = [agent.RULES, agent.build_prompt(conn, ceo), agent.build_prompt(conn, pres), pres["instructions"], ceo["instructions"]]
+    for t in texts:
+        assert not re.search(r"hotmart|kiwify|eduzz|mercado livre|marketplace|publique|cnpj", t, re.I), t[:200]
+    assert "loja do próprio servidor" in agent.RULES
+
+
+def test_migration_009_supersedes_old_owner_requests(url, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", url)
+    from meridiano.engine import db, migrate
+    c = db.connect()
+    c.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+    files = sorted(migrate.DIR.glob("*.sql"))
+    c.execute("CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())")
+    for f in files[:8]:
+        c.execute(f.read_text()); c.execute("INSERT INTO schema_migrations(name) VALUES (%s)", (f.name,))
+    c.execute("INSERT INTO owner_requests(body) VALUES ('Produto Toolkit pronto, preciso que o Junio publique no marketplace'),('Abrir conta na Hotmart com CPF')")
+    c.execute("INSERT INTO owner_requests(body,done) VALUES ('antigo já feito',true)")
+    assert migrate.migrate(c) == ["009_vendas_no_servidor.sql"]
+    rows = c.execute("SELECT done,resolution FROM owner_requests ORDER BY id").fetchall()
+    assert all(r["done"] for r in rows)
+    assert [r["resolution"] for r in rows[:2]] == ["substituído: as vendas passam a ser feitas no próprio servidor, com Mercado Pago"] * 2
+
+
+def test_token_request_is_the_only_owner_request_and_closes_when_configured(conn, tmp_path, monkeypatch):
+    from meridiano.engine import config, secrets_store as ss
+    monkeypatch.setattr(config, "SECRETS_DIR", str(tmp_path / "segredos"))
+    ss.sync_owner_request(conn); ss.sync_owner_request(conn)                       # idempotente
+    rows = conn.execute("SELECT body,done,from_id FROM owner_requests").fetchall()
+    assert len(rows) == 1 and rows[0]["body"] == ss.TOKEN_REQUEST and not rows[0]["done"] and rows[0]["from_id"] is None
+    monkeypatch.setattr(ss, "verify", lambda t: ("ok", "token aceito pelo Mercado Pago"))
+    assert ss.save_token("APP_USR-" + "a1b2c3d4" * 6)[0]
+    ss.sync_owner_request(conn)
+    assert conn.execute("SELECT done,resolution FROM owner_requests").fetchone() == {"done": True, "resolution": "token recebido"}
+    ss.sync_owner_request(conn)
+    assert conn.execute("SELECT COUNT(*) AS n FROM owner_requests").fetchone()["n"] == 1   # não reabre
+
+
+TOKEN = "APP_USR-1234567890123456-012345-" + "abcdef0123456789" * 2 + "-987654321"
+
+
+def test_api_token_is_stored_private_and_never_shown(conn, tmp_path, monkeypatch):
+    monkeypatch.setenv("MERIDIANO_API_TOKEN", "leitura"); monkeypatch.setenv("MERIDIANO_ADMIN_TOKEN", "admin")
+    from meridiano.engine import config, secrets_store as ss
+    from meridiano.api import main
+    sec = tmp_path / "segredos"
+    monkeypatch.setattr(config, "SECRETS_DIR", str(sec))
+    monkeypatch.setattr(ss, "verify", lambda t: ("ok", "token aceito pelo Mercado Pago"))
+    main._conn = conn
+    c = TestClient(main.app)
+    ss.sync_owner_request(conn)
+    body = {"access_token": TOKEN}
+    assert c.post("/api/secrets/mp-token", json=body).status_code == 401                                  # sem admin
+    assert c.post("/api/secrets/mp-token", json=body, headers={"X-Token": "leitura"}).status_code == 401   # leitura não basta
+    assert c.post("/api/secrets/mp-token", json={"access_token": "qualquer coisa"}, headers={"X-Admin-Token": "admin"}).status_code == 400
+    r = c.post("/api/secrets/mp-token", json=body, headers={"X-Admin-Token": "admin"})
+    assert r.status_code == 200 and r.json()["configurado"] and r.json()["modo"] == "producao" and r.json()["verificado"]
+    assert TOKEN not in r.text and "abcdef0123456789" not in r.text                                       # nunca devolvido
+    # arquivo privado: pasta 700, arquivo 600
+    assert oct(os.stat(sec).st_mode & 0o777) == "0o700" and oct(os.stat(sec / "mp_access_token").st_mode & 0o777) == "0o600"
+    assert (sec / "mp_access_token").read_text() == TOKEN and not (sec / "mp_access_token.tmp").exists()
+    # status não mostra o token
+    st = c.get("/api/secrets/mp-token", headers={"X-Token": "leitura"})
+    assert st.json()["configurado"] is True and TOKEN not in st.text
+    assert c.get("/api/secrets/mp-token").status_code == 401
+    # o pedido ao dono foi fechado; e o token não está em nenhuma tabela do banco
+    assert conn.execute("SELECT done FROM owner_requests").fetchone()["done"] is True
+    tabelas = [t["table_name"] for t in conn.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public'").fetchall()]
+    for t in tabelas:
+        dump = str(conn.execute(f'SELECT * FROM "{t}"').fetchall())
+        assert TOKEN not in dump and "abcdef0123456789abcdef0123456789" not in dump, t
+
+
+def test_invalid_token_is_rejected_and_not_saved(tmp_path, monkeypatch):
+    from meridiano.engine import config, secrets_store as ss
+    monkeypatch.setattr(config, "SECRETS_DIR", str(tmp_path / "segredos"))
+    monkeypatch.setattr(ss, "verify", lambda t: ("invalido", "o Mercado Pago recusou este token"))
+    ok, msg, meta = ss.save_token(TOKEN)
+    assert not ok and "recusou" in msg and not ss.configured()
+    monkeypatch.setattr(ss, "verify", lambda t: ("nao_verificado", "não foi possível falar com o Mercado Pago agora"))
+    ok, msg, meta = ss.save_token(TOKEN)
+    assert ok and meta["verificado"] is False and ss.configured()                                         # rede fora: salva e avisa
+    assert ss.status()["verificado"] is False and "TEST" not in str(ss.status())
+    ss.save_token("TEST-" + "x1y2z3w4" * 5)
+    assert ss.status()["modo"] == "teste"
+
+
+def test_token_never_reaches_tool_sandbox_or_agent_surface(tmp_path, monkeypatch):
+    """O arquivo mora sob a home, que o isolamento esconde; e nenhuma tool de agente lê esse caminho."""
+    from meridiano.engine import config, sandbox, tools
+    names = {sp["name"] for sp in tools.SPECS}
+    assert not any("secret" in n or "token" in n or "mp_" in n for n in names)
+    assert os.path.expanduser("~") in config.SECRETS_DIR or config.SECRETS_DIR.startswith(os.path.expanduser("~"))
+    assert os.path.realpath(os.path.expanduser("~")) in sandbox.hide_dirs() or any(config.SECRETS_DIR.startswith(h) for h in sandbox.hide_dirs())
