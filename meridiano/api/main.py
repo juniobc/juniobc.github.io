@@ -40,6 +40,21 @@ def read_auth(request: Request, x_token: str = Header(None), token: str = Query(
     raise HTTPException(401, "token inválido")
 
 
+def write_auth(request: Request, x_token: str = Header(None), token: str = Query(None), x_csrf: str = Header(None)):
+    """Escrita comum (chat, marcar pedido como feito): token de leitura em cabeçalho, OU sessão do Google com X-CSRF.
+    Cookie sozinho nunca basta: outro site não pode mandar ordens ao dono em nome da sessão."""
+    given = x_token or token
+    if given:
+        _check(given, "MERIDIANO_API_TOKEN")
+        return
+    sess = google_auth.session(conn(), request.cookies.get(SESSION_COOKIE))
+    if not sess:
+        raise HTTPException(401, "token inválido")
+    if not x_csrf or not hmac.compare_digest(x_csrf, sess["csrf"]):
+        google_auth.event(conn(), "csrf_ausente", sess["email"], "escrita sem o cabeçalho X-CSRF válido")
+        raise HTTPException(403, "proteção CSRF: recarregue a página")
+
+
 _recovery = {"fails": 0, "first": 0.0, "until": 0.0}   # tentativas erradas do token de recuperação (sem guardar o valor)
 
 
@@ -226,7 +241,7 @@ def owner_requests():
         "LEFT JOIN employees e ON e.id=r.from_id ORDER BY r.done, r.id DESC LIMIT 30").fetchall()
 
 
-@app.post("/api/owner-requests/{rid}/done", dependencies=[Depends(read_auth)])  # não mexe em dinheiro
+@app.post("/api/owner-requests/{rid}/done", dependencies=[Depends(write_auth)])  # não mexe em dinheiro
 def owner_request_done(rid: int):
     conn().execute("UPDATE owner_requests SET done=true WHERE id=%s", (rid,))
     return {"ok": True}
@@ -279,7 +294,7 @@ app.include_router(pay_routes.router)
 store_routes.register(app, read_auth, admin_auth, conn)
 llm_routes.register(app, read_auth, admin_auth, conn)
 auth_routes.register(app, read_auth, admin_auth, conn)
-chat_routes.register(app, read_auth, conn)
+chat_routes.register(app, read_auth, write_auth, conn)
 
 _web = pathlib.Path(__file__).parent.parent / "web" / "dist"
 if _web.is_dir():

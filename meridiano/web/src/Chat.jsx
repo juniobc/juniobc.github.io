@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { getToken } from './api.js';
+import { getCsrf, getToken } from './api.js';
 
 const SR = typeof window !== 'undefined' ? window.SpeechRecognition || window.webkitSpeechRecognition : null;
 const TTS = typeof window !== 'undefined' && 'speechSynthesis' in window && typeof window.SpeechSynthesisUtterance !== 'undefined';
@@ -8,7 +8,7 @@ const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
 const hora = (t) => new Date(t).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 
 async function enviar(to, body) {
-  const r = await fetch('api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': getToken() }, body: JSON.stringify({ to, body }) });
+  const r = await fetch('api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': getToken(), 'X-CSRF': getCsrf() }, body: JSON.stringify({ to, body }) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(typeof j.detail === 'string' ? j.detail : 'Não foi possível enviar.');
   return j;
