@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+*.env
+node_modules/
+meridiano/web/node_modules/
+.pytest_cache/
