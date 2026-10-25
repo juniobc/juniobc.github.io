@@ -33,15 +33,15 @@ def database_url():
 
 
 def _limit(name, default, old_deploy_default):
-    """Os arquivos de ambiente antigos trazem 300 / 400000, gravados pelo deploy. Esses valores (e menores)
-    são tratados como "valor antigo" e substituídos pelo padrão novo; só um valor maior é respeitado."""
+    """Os arquivos de ambiente antigos trazem valores de versões anteriores (300 / 400000, depois 600 / 1500000).
+    Esses valores (e menores) são tratados como "valor antigo" e substituídos pelo padrão novo; só um valor maior é respeitado."""
     v = int(env(name, str(default)))
     return default if v <= old_deploy_default else v
 
 
 # modelos são :free; o limite duro só deixa o ritmo lento (SLOW_TICK_SECONDS), nunca para o motor
-DAILY_CALL_LIMIT = _limit("DAILY_CALL_LIMIT", 600, 300)
-DAILY_TOKEN_LIMIT = _limit("DAILY_TOKEN_LIMIT", 1500000, 400000)
+DAILY_CALL_LIMIT = _limit("DAILY_CALL_LIMIT", 2000, 600)           # valores antigos (300, 600) viram 2000
+DAILY_TOKEN_LIMIT = _limit("DAILY_TOKEN_LIMIT", 8000000, 1500000)  # valores antigos (400000, 1500000) viram 8000000
 SLOW_TICK_SECONDS = int(env("SLOW_TICK_SECONDS", "600"))
 TICK_SECONDS = int(env("TICK_SECONDS", "60"))  # um funcionário por minuto, em rodízio
 MAX_TOOL_ROUNDS = int(env("MAX_TOOL_ROUNDS", "5"))
