@@ -18,6 +18,7 @@ TOKEN_RE = re.compile(r"^(APP_USR|TEST)-[A-Za-z0-9_\-]{20,200}$")
 TOKEN_REQUEST = "Preciso do access token do Mercado Pago (Credenciais de produção) para receber pagamentos. Abra a aba Configurações e cole no cartão Mercado Pago"
 TOKEN_FILE = "mp-token"
 LEGACY_FILE = "mp_access_token"     # nome usado na primeira versão do painel
+JSON_FILE = "mercadopago.json"      # {"access_token": "APP_USR-..."}: criado direto no servidor pelo administrador (só vale se não houver mp-token)
 META_FILE = "mp-meta.json"
 WEBHOOK_FILE = "mp-webhook-secret"   # opcional: "Assinatura secreta" do webhook (Suas integrações > Webhooks)
 STORE_FILE = "store.json"           # {"seller_name": "...", "contact_email": "..."}: identificação do vendedor, pelo caminho (b)
@@ -48,7 +49,7 @@ def _write_private(name, text):
 
 
 def _token_file():
-    for n in (TOKEN_FILE, LEGACY_FILE):
+    for n in (TOKEN_FILE, LEGACY_FILE, JSON_FILE):   # o token salvo pelo painel (mp-token) tem prioridade: nunca há dois tokens valendo
         p = _path(n)
         if os.path.isfile(p) and os.path.getsize(p) > 0:
             return p
@@ -57,6 +58,12 @@ def _token_file():
 
 def _parse(text):
     """Aceita o token puro ou KEY=token, com ou sem aspas e quebra de linha (como o administrador costuma criar o arquivo)."""
+    if text.lstrip().startswith("{"):   # arquivo JSON: {"access_token": "..."}
+        try:
+            d = json.loads(text)
+            return str(d.get("access_token") or d.get("token") or "").strip()
+        except (ValueError, AttributeError):
+            return ""
     line = next((x.strip() for x in text.splitlines() if x.strip() and not x.strip().startswith("#")), "")
     if "=" in line:
         line = line.split("=", 1)[1].strip()
@@ -112,12 +119,12 @@ def ensure_private():
         if os.path.isdir(config.SECRETS_DIR):
             if os.stat(config.SECRETS_DIR).st_mode & 0o077:
                 os.chmod(config.SECRETS_DIR, 0o700)
-            for n in (TOKEN_FILE, LEGACY_FILE, META_FILE, STORE_FILE, WEBHOOK_FILE):
+            for n in (TOKEN_FILE, LEGACY_FILE, JSON_FILE, META_FILE, STORE_FILE, WEBHOOK_FILE):
                 p = _path(n)
                 if os.path.isfile(p) and os.stat(p).st_mode & 0o077:
                     os.chmod(p, 0o600)
             ok = not (os.stat(config.SECRETS_DIR).st_mode & 0o077) and all(
-                not (os.stat(_path(n)).st_mode & 0o077) for n in (TOKEN_FILE, LEGACY_FILE) if os.path.isfile(_path(n)))
+                not (os.stat(_path(n)).st_mode & 0o077) for n in (TOKEN_FILE, LEGACY_FILE, JSON_FILE) if os.path.isfile(_path(n)))
     except OSError:
         ok = False
     return ok
@@ -213,7 +220,7 @@ def save_token(raw):
 
 def remove_token():
     """Apaga o token (e a verificação) da pasta de segredos. O pedido ao dono reabre no próximo sync."""
-    for n in (TOKEN_FILE, LEGACY_FILE, META_FILE):
+    for n in (TOKEN_FILE, LEGACY_FILE, JSON_FILE, META_FILE):
         try:
             os.unlink(_path(n))
         except FileNotFoundError:
