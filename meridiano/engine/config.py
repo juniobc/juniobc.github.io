@@ -49,3 +49,4 @@ MAX_EMPLOYEES = int(env("MAX_EMPLOYEES", "20"))
 MAX_TOKENS = int(env("MAX_TOKENS", "3000"))
 DAILY_FAIL_LIMIT = int(env("DAILY_FAIL_LIMIT", "60"))  # chamadas vazias/erro não gastam o limite útil, mas têm teto próprio
 PRODUCTS_DIR = env("PRODUCTS_DIR", os.path.join(os.path.expanduser("~"), "meridiano_produtos"))
+MIN_SECTION_WORDS = int(env("MIN_SECTION_WORDS", "400"))

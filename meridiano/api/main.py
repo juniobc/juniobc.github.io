@@ -135,7 +135,12 @@ def tasks(limit: int = Query(50, le=200)):
 
 @app.get("/api/products", dependencies=[Depends(read_auth)])
 def products():
-    return conn().execute("SELECT id,name,description,file_path,content,status,price_cents,updated_at FROM products ORDER BY id DESC").fetchall()
+    return conn().execute(
+        "SELECT p.id,p.name,p.description,p.file_path,p.content,p.status,p.price_cents,p.updated_at, "
+        "(SELECT COUNT(*) FROM product_sections s WHERE s.product_id=p.id) AS secoes_total, "
+        "(SELECT COUNT(*) FROM product_sections s WHERE s.product_id=p.id AND s.content<>'' AND NOT s.needs_rewrite) AS secoes_prontas, "
+        "length(p.content) AS caracteres "
+        "FROM products p ORDER BY p.id DESC").fetchall()
 
 
 @app.get("/api/ledger", dependencies=[Depends(read_auth)])

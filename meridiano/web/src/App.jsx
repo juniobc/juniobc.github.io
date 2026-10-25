@@ -109,7 +109,7 @@ export default function App() {
         {!d.tasks.length && <li className="note">Sem tarefas.</li>}</ul>}
 
       {tab === 2 && <ul className="feed">{d.prods.map((p) => (
-        <li key={p.id}><b>{p.name}</b> <small>({p.status}{p.price_cents ? ` · ${brl(p.price_cents / 100)}` : ' · sem preço'} · {p.content.length} caracteres)</small><br />{p.description}
+        <li key={p.id}><b>{p.name}</b> <small>({p.status}{p.price_cents ? ` · ${brl(p.price_cents / 100)}` : ' · sem preço'})</small><br /><b>{p.secoes_total > 0 ? `${p.secoes_prontas} de ${p.secoes_total} seções` : 'sem plano de seções'}, {p.caracteres} caracteres</b><br />{p.description}
           {p.content && <details><summary>Ver conteúdo</summary><pre style={{ whiteSpace: 'pre-wrap' }}>{p.content}</pre></details>}</li>))}
         {!d.prods.length && <li className="note">Nenhum produto ainda.</li>}</ul>}
 
