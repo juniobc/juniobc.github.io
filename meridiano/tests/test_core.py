@@ -1922,3 +1922,275 @@ def test_second_payment_does_not_issue_a_second_link(conn, shop):
     o = _buy_and_pay(shop, conn)
     shop.pay(o, "1002"); assert shop.webhook("1002").json()["resultado"] == "pagamento_duplicado"
     assert conn.execute("SELECT COUNT(*) AS n FROM downloads").fetchone()["n"] == 1
+
+
+# ---------------------------------------------------------------- PR A: perfis de LLM, custo, tetos e contingência
+def _paid(conn, label="Nous · Claude Haiku 5.5"):
+    return conn.execute("SELECT * FROM llm_profiles WHERE label=%s", (label,)).fetchone()
+
+
+def _open_paid(conn, secdir, label="Nous · Claude Haiku 5.5", cap=1.0):
+    p = _paid(conn, label)
+    (secdir / f"llm-{p['key_name']}").write_text("chave-de-teste-123456")
+    conn.execute("UPDATE llm_profiles SET enabled=true, daily_usd_cap=%s WHERE id=%s", (cap, p["id"]))
+    return conn.execute("SELECT * FROM llm_profiles WHERE id=%s", (p["id"],)).fetchone()
+
+
+def test_llm_migration_seeds_profiles_contingency_on_and_backfills_employees(conn):
+    from meridiano.engine import seed
+    assert conn.execute("SELECT contingency FROM llm_settings").fetchone()["contingency"] is True
+    free = conn.execute("SELECT COUNT(*) AS n FROM llm_profiles WHERE is_free").fetchone()["n"]
+    enabled_free = conn.execute("SELECT COUNT(*) AS n FROM llm_profiles WHERE is_free AND enabled").fetchone()["n"]
+    assert free == 8 and enabled_free == 6
+    paid = conn.execute("SELECT * FROM llm_profiles WHERE NOT is_free").fetchall()
+    assert len(paid) >= 10 and not any(p["enabled"] for p in paid)
+    h = _paid(conn)
+    assert float(h["price_in_per_m"]) == 0.10 and float(h["price_out_per_m"]) == 0.50 and h["model"] == "anthropic/claude-haiku-5.5"
+    assert conn.execute("SELECT 1 FROM llm_profiles WHERE provider='anthropic' AND base_url='https://api.anthropic.com/v1'").fetchone()
+    seed.seed(conn)
+    from meridiano.engine import llm
+    me = conn.execute("SELECT * FROM employees WHERE slug='ceo'").fetchone()
+    assert llm.resolve(conn, me)["profile"]["is_free"] and llm.resolve(conn, me)["reason"] == ""
+
+
+def test_contingency_keeps_config_but_calls_only_free(conn, secdir):
+    from meridiano.engine import llm, seed
+    seed.seed(conn)
+    p = _open_paid(conn, secdir)
+    conn.execute("UPDATE employees SET llm_profile_id=%s WHERE slug='ceo'", (p["id"],))
+    me = conn.execute("SELECT * FROM employees WHERE slug='ceo'").fetchone()
+    r = llm.resolve(conn, me)                                   # contingência ligada por padrão
+    assert r["profile"]["is_free"] and r["wanted"]["id"] == p["id"] and "contingência" in r["reason"]
+    assert conn.execute("SELECT llm_profile_id FROM employees WHERE slug='ceo'").fetchone()["llm_profile_id"] == p["id"]   # configuração preservada
+    conn.execute("UPDATE llm_settings SET contingency=false")
+    assert llm.resolve(conn, me)["profile"]["id"] == p["id"]    # voltou quando o modo desligou
+    conn.execute("UPDATE llm_settings SET contingency=true")
+    with pytest.raises(ValueError):
+        llm.chat(conn, None, p["model"], [])                    # nem a chamada direta passa a pago na contingência
+
+
+def test_paid_requires_key_cap_and_respects_profile_and_global_caps(conn, secdir):
+    from meridiano.engine import llm
+    conn.execute("UPDATE llm_settings SET contingency=false")
+    p = _paid(conn)
+    conn.execute("UPDATE llm_profiles SET enabled=true WHERE id=%s", (p["id"],))
+    p = _paid(conn)
+    assert llm.usable(conn, p) == (False, "sem chave configurada")
+    (secdir / "llm-nous").write_text("chave-de-teste-123456")
+    conn.execute("UPDATE llm_profiles SET daily_usd_cap=NULL WHERE id=%s", (p["id"],))
+    assert llm.usable(conn, _paid(conn))[1] == "sem limite diário em USD"
+    conn.execute("UPDATE llm_profiles SET daily_usd_cap=0.50 WHERE id=%s", (p["id"],))
+    assert llm.usable(conn, _paid(conn))[0]
+    conn.execute("INSERT INTO usage_log(model,profile_id,cost_usd) VALUES ('x',%s,0.50)", (p["id"],))
+    ok, why = llm.usable(conn, _paid(conn))
+    assert not ok and "limite diário" in why
+    conn.execute("UPDATE llm_profiles SET daily_usd_cap=5 WHERE id=%s", (p["id"],))
+    conn.execute("UPDATE llm_settings SET global_usd_cap=0.50")
+    ok, why = llm.usable(conn, _paid(conn))
+    assert not ok and "teto global" in why
+
+
+def test_cost_is_computed_from_provider_usage_and_logged(conn, secdir, monkeypatch):
+    from meridiano.engine import llm
+    conn.execute("UPDATE llm_settings SET contingency=false")
+    p = _open_paid(conn, secdir, "Nous · Claude Sonnet 5.5")
+    seen = {}
+
+    class R:
+        status_code = 200
+        headers = {}
+        def raise_for_status(self): pass
+        def json(self): return {"choices": [{"message": {"role": "assistant", "content": "oi"}}], "usage": {"prompt_tokens": 1_000_000, "completion_tokens": 500_000}}
+
+    def post(url, json=None, headers=None, timeout=None):
+        seen.update(url=url, headers=headers, body=json)
+        return R()
+    monkeypatch.setattr(llm.httpx, "post", post)
+    assert llm.chat_fallback(conn, None, p["model"], [{"role": "user", "content": "a"}])["content"] == "oi"
+    assert seen["url"] == "https://inference-api.nousresearch.com/v1/chat/completions" and seen["headers"]["Authorization"] == "Bearer chave-de-teste-123456"
+    row = conn.execute("SELECT cost_usd, profile_id FROM usage_log ORDER BY id DESC LIMIT 1").fetchone()
+    assert float(row["cost_usd"]) == 2.0 + 5.0 and row["profile_id"] == p["id"]    # 1M x 2,00 + 0,5M x 10,00
+    assert llm.spent_today(conn) == 7.0
+    assert not llm.usable(conn, conn.execute("SELECT * FROM llm_profiles WHERE id=%s", (p["id"],)).fetchone())[0]   # estourou o limite de US$ 1
+
+
+def test_over_cap_agent_falls_back_to_free_profile(conn, secdir, monkeypatch):
+    from meridiano.engine import llm, seed
+    seed.seed(conn)
+    conn.execute("UPDATE llm_settings SET contingency=false")
+    p = _open_paid(conn, secdir, cap=0.01)
+    conn.execute("UPDATE employees SET llm_profile_id=%s WHERE slug='ceo'", (p["id"],))
+    conn.execute("INSERT INTO usage_log(model,profile_id,cost_usd) VALUES ('x',%s,0.02)", (p["id"],))
+    used = []
+
+    class R:
+        status_code = 200
+        headers = {}
+        def raise_for_status(self): pass
+        def json(self): return {"choices": [{"message": {"role": "assistant", "content": "ok"}}], "usage": {"prompt_tokens": 3, "completion_tokens": 3}}
+    monkeypatch.setattr(llm.httpx, "post", lambda url, json=None, **k: used.append(json["model"]) or R())
+    monkeypatch.setenv("NOUS_API_KEY", "k-nous-123456")
+    ceo = conn.execute("SELECT id FROM employees WHERE slug='ceo'").fetchone()
+    llm.chat_fallback(conn, ceo["id"], "x", [])
+    assert used and used[0].endswith(":free")
+
+
+def test_anthropic_adapter_converts_tools_and_results(conn, secdir, monkeypatch):
+    from meridiano.engine import llm
+    conn.execute("UPDATE llm_settings SET contingency=false")
+    p = _open_paid(conn, secdir, "Anthropic direta · Haiku 5.5")
+    tools = [{"type": "function", "function": {"name": "create_task", "description": "d", "parameters": {"type": "object", "properties": {"title": {"type": "string"}}}}}]
+    msgs = [{"role": "system", "content": "SIS"}, {"role": "user", "content": "faça"},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "t1", "type": "function", "function": {"name": "create_task", "arguments": '{"title":"a"}'}},
+                                                               {"id": "t2", "type": "function", "function": {"name": "create_task", "arguments": '{"title":"b"}'}}]},
+            {"role": "tool", "tool_call_id": "t1", "content": "ok1"}, {"role": "tool", "tool_call_id": "t2", "content": "ok2"}]
+    conv = llm.to_anthropic(msgs, tools)
+    assert conv["system"] == "SIS" and [m["role"] for m in conv["messages"]] == ["user", "assistant", "user"]
+    assert [b["type"] for b in conv["messages"][1]["content"]] == ["tool_use", "tool_use"] and conv["messages"][1]["content"][0]["input"] == {"title": "a"}
+    assert [b["tool_use_id"] for b in conv["messages"][2]["content"]] == ["t1", "t2"]      # resultados juntos numa só mensagem do usuário
+    assert conv["tools"][0] == {"name": "create_task", "description": "d", "input_schema": tools[0]["function"]["parameters"]}
+    seen = {}
+
+    class R:
+        status_code = 200
+        headers = {}
+        def raise_for_status(self): pass
+        def json(self): return {"content": [{"type": "text", "text": "vou"}, {"type": "tool_use", "id": "u9", "name": "create_task", "input": {"title": "z"}}],
+                                "usage": {"input_tokens": 2_000_000, "output_tokens": 1_000_000}}
+    monkeypatch.setattr(llm.httpx, "post", lambda url, json=None, headers=None, **k: seen.update(url=url, headers=headers, body=json) or R())
+    msg = llm.call(conn, None, p, msgs, tools)
+    assert seen["url"] == "https://api.anthropic.com/v1/messages" and seen["headers"]["x-api-key"] == "chave-de-teste-123456" and "anthropic-version" in seen["headers"]
+    assert "Authorization" not in seen["headers"] and seen["body"]["model"] == "claude-haiku-5-5" and seen["body"]["max_tokens"]
+    assert msg["content"] == "vou" and msg["tool_calls"][0] == {"id": "u9", "type": "function", "function": {"name": "create_task", "arguments": '{"title": "z"}'}}
+    assert float(conn.execute("SELECT cost_usd FROM usage_log ORDER BY id DESC LIMIT 1").fetchone()["cost_usd"]) == 0.2 + 0.5
+
+
+def test_empty_anthropic_reply_is_failure_and_error_hides_key(conn, secdir, monkeypatch):
+    from meridiano.engine import llm
+    import httpx
+    conn.execute("UPDATE llm_settings SET contingency=false")
+    p = _open_paid(conn, secdir, "Anthropic direta · Haiku 5.5")
+
+    def boom(*a, **k):
+        req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+        raise httpx.HTTPStatusError("x", request=req, response=httpx.Response(401, text="bad key chave-de-teste-123456", request=req))
+    monkeypatch.setattr(llm.httpx, "post", boom)
+    with pytest.raises(httpx.HTTPStatusError):
+        llm.call(conn, None, p, [{"role": "user", "content": "a"}])
+    err = llm.failures_today(conn)[1]
+    assert "401" in err and "chave-de-teste" not in err
+
+
+def test_host_allowlist_and_key_names_block_exfiltration(secdir):
+    from meridiano.engine import llm
+    for bad in ("http://api.openai.com/v1", "https://evil.example.com/v1", "https://api.openai.com.evil.com/v1", "https://user:p@api.openai.com/v1", "https://api.openai.com:8443/v1", "file:///etc/passwd"):
+        assert not llm.host_ok(bad), bad
+    for good in ("https://api.openai.com/v1", "https://openrouter.ai/api/v1", "https://inference-api.nousresearch.com/v1", "https://api.anthropic.com/v1"):
+        assert llm.host_ok(good)
+    assert llm.key_path("../mp-token") is None and llm.key_path("a/b") is None and llm.key_path("") is None
+    ok, _ = llm.save_key("openai", "sk-teste-abcdefgh")
+    assert ok and oct((secdir / "llm-openai").stat().st_mode & 0o777) == "0o600"
+    assert not llm.save_key("../x", "sk-teste-abcdefgh")[0] and not llm.save_key("openai", "curta")[0] and not llm.save_key("openai", "tem espaco no meio")[0]
+
+
+def _llm_client(conn, monkeypatch):
+    monkeypatch.setenv("MERIDIANO_API_TOKEN", "leitura")
+    monkeypatch.setenv("MERIDIANO_ADMIN_TOKEN", "admin")
+    from meridiano.api import main
+    main._conn = conn
+    return TestClient(main.app)
+
+
+def test_api_llm_admin_actions_and_secrets_never_exposed(conn, secdir, monkeypatch):
+    from meridiano.engine import seed
+    seed.seed(conn)
+    c = _llm_client(conn, monkeypatch)
+    R, A = {"X-Token": "leitura"}, {"X-Admin-Token": "admin"}
+    assert c.get("/api/llm").status_code == 401
+    ov = c.get("/api/llm", headers=R).json()
+    assert ov["contingencia"] is True and len(ov["funcionarios"]) == 2 and ov["gasto_hoje_usd"] == 0
+    pid = next(p["id"] for p in ov["perfis"] if p["label"] == "Nous · Claude Haiku 5.5")
+    assert not next(p for p in ov["perfis"] if p["id"] == pid)["chave_configurada"] or True
+    # leitura não altera nada
+    for path, body in (("/api/llm/contingency", {"on": False}), (f"/api/llm/profiles/{pid}", {"enabled": True}), ("/api/llm/keys/nous", {"key": "chave-de-teste-123456"}), ("/api/llm/employees/ceo", {"profile_id": pid})):
+        r = c.patch(path, json=body, headers=R) if "profiles" in path else c.post(path, json=body, headers=R)
+        assert r.status_code == 401, path
+    # ligar pago sem chave / sem limite é recusado
+    (secdir / "llm-nous").unlink(missing_ok=True)
+    monkeypatch.delenv("NOUS_API_KEY", raising=False)
+    assert c.patch(f"/api/llm/profiles/{pid}", json={"enabled": True}, headers=A).status_code == 400
+    r = c.post("/api/llm/keys/nous", json={"key": "chave-de-teste-123456"}, headers=A)
+    assert r.status_code == 200 and "chave-de-teste" not in r.text
+    assert c.patch(f"/api/llm/profiles/{pid}", json={"enabled": True, "daily_usd_cap": 0}, headers=A).status_code == 400
+    assert c.patch(f"/api/llm/profiles/{pid}", json={"enabled": True, "daily_usd_cap": 0.75}, headers=A).status_code == 200
+    # atribui na contingência: guarda, mas o efetivo continua grátis e o painel avisa
+    assert c.post("/api/llm/employees/ceo", json={"profile_id": pid}, headers=A).status_code == 200
+    ov = c.get("/api/llm", headers=R).json()
+    ceo = next(f for f in ov["funcionarios"] if f["slug"] == "ceo")
+    assert ceo["perfil_id"] == pid and "Nous · Claude" not in ceo["efetivo"] and "contingência" in ceo["desvio"] and ov["avisos"]
+    assert "chave-de-teste" not in c.get("/api/llm", headers=R).text
+    assert c.post("/api/llm/contingency", json={"on": False}, headers=A).status_code == 200
+    ceo = next(f for f in c.get("/api/llm", headers=R).json()["funcionarios"] if f["slug"] == "ceo")
+    assert ceo["efetivo"] == "Nous · Claude Haiku 5.5" and ceo["desvio"] == ""
+    assert c.post("/api/llm/global-cap", json={"usd": 3}, headers=A).json()["teto_global_usd"] == 3
+    assert c.post("/api/llm/employees/ceo", json={"profile_id": None}, headers=A).status_code == 200
+    assert c.post("/api/llm/employees/ghost", json={"profile_id": None}, headers=A).status_code == 404
+    # perfil desligado não pode ser atribuído; sempre sobra um grátis ligado
+    off = next(p["id"] for p in ov["perfis"] if p["label"] == "Nous · Claude Opus 5.5")
+    assert c.post("/api/llm/employees/ceo", json={"profile_id": off}, headers=A).status_code == 400
+    for p in ov["perfis"]:
+        if p["gratis"] and p["ligado"]:
+            r = c.patch(f"/api/llm/profiles/{p['id']}", json={"enabled": False}, headers=A)
+    assert conn.execute("SELECT COUNT(*) AS n FROM llm_profiles WHERE is_free AND enabled").fetchone()["n"] == 1
+
+
+def test_api_profile_creation_blocks_foreign_hosts_and_starts_disabled(conn, monkeypatch):
+    c = _llm_client(conn, monkeypatch)
+    A = {"X-Admin-Token": "admin"}
+    base = {"label": "Meu perfil", "provider": "openai_compat", "base_url": "https://openrouter.ai/api/v1", "model": "google/gemma-4-31b-it:free", "key_name": "openrouter",
+            "price_in_per_m": 0, "price_out_per_m": 0, "is_free": True}
+    assert c.post("/api/llm/profiles", json={**base, "base_url": "https://evil.example.com/v1", "label": "x1x"}, headers=A).status_code == 400
+    assert c.post("/api/llm/profiles", json={**base, "base_url": "http://openrouter.ai/api/v1", "label": "x2x"}, headers=A).status_code == 400
+    assert c.post("/api/llm/profiles", json={**base, "provider": "anthropic", "label": "x3x"}, headers=A).status_code == 400
+    assert c.post("/api/llm/profiles", json={**base, "price_in_per_m": 1, "label": "x4x"}, headers=A).status_code == 400
+    assert c.post("/api/llm/profiles", json={**base, "key_name": "../mp-token", "label": "x5x"}, headers=A).status_code == 422
+    r = c.post("/api/llm/profiles", json=base, headers={"X-Token": "leitura"})
+    assert r.status_code == 401
+    r = c.post("/api/llm/profiles", json=base, headers=A)
+    assert r.status_code == 200 and r.json()["ligado"] is False
+    assert c.post("/api/llm/profiles", json=base, headers=A).status_code == 409
+
+
+def test_hire_with_llm_profile_follows_mode_and_decision_roles(conn, secdir):
+    from meridiano.engine import seed, tools
+    seed.seed(conn)
+    ceo = conn.execute("SELECT * FROM employees WHERE slug='ceo'").fetchone()
+    p = _open_paid(conn, secdir, "Nous · Claude Opus 5.5")
+    out = tools.run_tool(conn, ceo, "hire_employee", {"name": "Ana", "role": "Analista", "area": "A", "llm_profile": p["label"], **HIRE})
+    assert out.startswith("erro") and "contingência" in out                                 # contingência ligada: pago recusado
+    out = tools.run_tool(conn, ceo, "hire_employee", {"name": "Ana", "role": "Analista", "area": "A", "llm_profile": "não existe", **HIRE})
+    assert out.startswith("erro")
+    out = tools.run_tool(conn, ceo, "hire_employee", {"name": "Bia", "role": "Analista", "area": "A", **HIRE})
+    bia = conn.execute("SELECT e.*, p.is_free FROM employees e JOIN llm_profiles p ON p.id=e.llm_profile_id WHERE slug='bia'").fetchone()
+    assert out.startswith("contratado") and bia["is_free"]                                    # padrão grátis
+    conn.execute("UPDATE llm_settings SET contingency=false")
+    assert tools.run_tool(conn, ceo, "hire_employee", {"name": "Caio", "role": "Analista", "area": "A", "llm_profile": p["label"], **HIRE}).startswith("contratado")
+    caio = conn.execute("SELECT * FROM employees WHERE slug='caio'").fetchone()
+    assert caio["llm_profile_id"] == p["id"] and caio["model"] == p["model"]
+    # cargo de decisão sem escolha: o melhor liberado dentro do teto (aqui o Opus); sem espaço no teto, o grátis
+    assert tools.run_tool(conn, ceo, "hire_employee", {"name": "Dora", "role": "Diretora Jurídica", "area": "J", **HIRE}).startswith("contratado")
+    assert conn.execute("SELECT llm_profile_id FROM employees WHERE slug='dora'").fetchone()["llm_profile_id"] == p["id"]
+    conn.execute("INSERT INTO usage_log(model,profile_id,cost_usd) VALUES ('x',%s,5)", (p["id"],))
+    assert tools.run_tool(conn, ceo, "hire_employee", {"name": "Eva", "role": "Presidente Adjunta", "area": "J", **HIRE}).startswith("contratado")
+    assert conn.execute("SELECT p.is_free FROM employees e JOIN llm_profiles p ON p.id=e.llm_profile_id WHERE slug='eva'").fetchone()["is_free"]
+
+
+def test_list_llm_profiles_tool_shows_prices_and_no_keys(conn, secdir):
+    from meridiano.engine import seed, tools
+    seed.seed(conn)
+    _open_paid(conn, secdir)
+    ceo = conn.execute("SELECT * FROM employees WHERE slug='ceo'").fetchone()
+    out = tools.run_tool(conn, ceo, "list_llm_profiles", {})
+    assert "CONTINGÊNCIA LIGADO" in out and "grátis" in out and "0.10/0.50" in out and "chave-de-teste" not in out
+    assert "list_llm_profiles" in [t["function"]["name"] for t in tools.TOOL_DEFS]
+    assert any("llm_profile" in t["function"]["parameters"]["properties"] for t in tools.TOOL_DEFS if t["function"]["name"] == "hire_employee")

@@ -67,3 +67,11 @@ O painel mostra uma linha **"Loja: aberta/fechada (motivo)"** e, por produto, po
 4. **revisão aprovada pela Presidente** *desta versão* da página: se o texto ou o preço mudar depois, a aprovação cai e é preciso revisar de novo (quem escreveu o texto nunca o revisa; se foi a Presidente, o CEO revisa).
 
 **Entrega:** a compra confirmada gera um link único, válido por 7 dias e com 5 downloads (PDF e Markdown). Os botões são formulários (POST), então pré-visualizadores de links não gastam downloads. Reembolso total ou chargeback revogam o link na hora. O PDF leva o número do pedido no rodapé. Variáveis: `DOWNLOAD_DAYS`, `DOWNLOAD_MAX`.
+
+## Modelos de LLM por funcionário (perfis)
+- Cada funcionário tem um perfil de LLM (aba **Modelos** do painel; trocar exige o token de administrador). Os 8 `:free` da Nous vêm cadastrados; os pagos (Claude via Nous, Anthropic direta, OpenAI direta) vêm **desligados**.
+- Chaves: arquivo `~/meridiano/secrets/llm-<key_name>` (chmod 600, pasta 700) ou o campo "Chaves" da aba Modelos. Nomes usados: `nous` (também vale `NOUS_API_KEY` do ambiente), `anthropic`, `openai`, `openrouter`. A chave nunca vai ao banco, ao log nem aos agentes.
+- Hosts permitidos (anti-exfiltração): `inference-api.nousresearch.com`, `openrouter.ai`, `api.openai.com`, `api.anthropic.com`, só por https.
+- **Modo contingência** (ligado por padrão): só perfis grátis são chamados; a escolha de cada funcionário fica guardada e volta ao desligar.
+- Custo em USD por chamada = tokens x preço do perfil. Limite diário por perfil pago + teto global; ao bater, o funcionário usa o grátis padrão e o painel avisa. Ligar um perfil pago exige chave e limite diário.
+- Se a API do painel não enxerga `NOUS_API_KEY` (variável só do motor), grave a chave `nous` pelo painel para poder ligar os perfis pagos da Nous.
