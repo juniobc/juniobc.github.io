@@ -186,6 +186,9 @@ def _propose_tool(conn, me, args):
         if not conn.execute("SELECT 1 FROM owner_requests WHERE body=%s", (body,)).fetchone():
             conn.execute("INSERT INTO owner_requests(from_id,body) VALUES (%s,%s)", (me["id"], body))
         return "ferramenta de nível C: ficou pendente e o dono foi avisado; ela só ativa se ele aprovar"
+    if not sandbox.enabled():   # portão fechado: grava como rascunho, não executa nada
+        conn.execute("UPDATE custom_tools SET status='rascunho', review_note=%s WHERE id=%s", (sandbox.OFF_MSG + "; os testes rodam quando as ferramentas forem ligadas", tid))
+        return f"ferramenta '{name}' v{version} salva como RASCUNHO: {sandbox.OFF_MSG}. Os testes rodam quando o isolamento for liberado."
     res = sandbox.execute(code, tests=tests)
     _log_run(conn, tool, me, "teste", {}, res)
     if not res.get("ok"):
@@ -194,7 +197,28 @@ def _propose_tool(conn, me, args):
     return f"ferramenta '{name}' v{version} passou na validação e nos {res['result'].get('testes', '?')} teste(s); aguarda revisão de outro chefe (read_tool + approve_tool)"
 
 
+def process_drafts(conn):
+    """Quando o portão abre, roda os testes dos rascunhos e os manda para revisão (ou recusa). Devolve quantos processou."""
+    from . import sandbox
+    if not sandbox.enabled():
+        return 0
+    n = 0
+    for t in conn.execute("SELECT * FROM custom_tools WHERE status='rascunho'").fetchall():
+        res = sandbox.execute(t["code"], tests=t["tests_code"])
+        _log_run(conn, t, {"id": t["author_id"]}, "teste", {}, res)
+        if res.get("ok"):
+            conn.execute("UPDATE custom_tools SET status='revisao', review_note='', updated_at=now() WHERE id=%s", (t["id"],))
+        else:
+            conn.execute("UPDATE custom_tools SET status='recusada', review_note=%s, last_error=%s, updated_at=now() WHERE id=%s",
+                         ("testes falharam: " + str(res.get("error")), str(res.get("error"))[:500], t["id"]))
+        n += 1
+    return n
+
+
 def _approve_tool(conn, me, args):
+    from . import sandbox
+    if not sandbox.enabled():
+        return sandbox.OFF_MSG
     if not REVIEWER_RE.search(me["role"]):
         return "erro: só Presidente ou CEO revisam ferramentas"
     t = conn.execute("SELECT * FROM custom_tools WHERE name=%s", (str(args["name"]).strip(),)).fetchone()
@@ -216,6 +240,8 @@ def _approve_tool(conn, me, args):
 
 def _run_custom_tool(conn, me, args):
     from . import sandbox
+    if not sandbox.enabled():
+        return sandbox.OFF_MSG
     t = conn.execute("SELECT * FROM custom_tools WHERE name=%s", (str(args["name"]).strip(),)).fetchone()
     if not t:
         return "erro: ferramenta não existe (use list_tools)"

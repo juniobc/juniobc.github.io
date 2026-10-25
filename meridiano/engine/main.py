@@ -21,12 +21,17 @@ def main():
     seed.seed(conn)
     seed.refresh_instructions(conn)
     plan.ensure(conn)
-    pacing.record_isolation(conn)
+    g = pacing.record_isolation(conn)
+    log.info("ferramentas: %s", g["reason"])
     conn.execute("UPDATE employees SET model=%s WHERE model = ANY(%s)", (config.DEFAULT_ROTATION[0], list(config.AVOID)))
     log.info("limites efetivos: %s chamadas, %s tokens por dia", config.DAILY_CALL_LIMIT, config.DAILY_TOKEN_LIMIT)
     last = 0
     backoff = 0
+    next_gate = time.time() + config.GATE_CHECK_SECONDS
     while True:
+        if time.time() >= next_gate:   # reverifica o isolamento a cada 5 min; qualquer falha desliga as ferramentas
+            pacing.record_isolation(conn)
+            next_gate = time.time() + config.GATE_CHECK_SECONDS
         me = pick(conn, last)
         errored = False
         done = None

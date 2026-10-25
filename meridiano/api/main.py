@@ -58,14 +58,14 @@ def engine_status():
     r = conn().execute(
         "SELECT es.wait_reason, es.sleep_s, "
         "extract(epoch FROM now() - es.heartbeat_at) AS since_beat, extract(epoch FROM es.next_turn_at - now()) AS next_in, "
-        "es.last_turn_at, es.isolation, l.name AS ultimo_por, c.name AS da_vez "
+        "es.last_turn_at, es.isolation, es.tools_enabled, es.tools_reason, es.tools_help, es.tools_backend, l.name AS ultimo_por, c.name AS da_vez "
         "FROM engine_status es LEFT JOIN employees l ON l.id=es.last_turn_employee_id LEFT JOIN employees c ON c.id=es.current_employee_id WHERE es.id=1").fetchone()
     if not r or r["since_beat"] is None:
         return {"vivo": False, "motivo_espera": "motor nunca iniciou", "proximo_turno_em_s": None, "ultimo_turno_em": None, "ultimo_turno_por": None, "funcionario_da_vez": None}
     return {"vivo": float(r["since_beat"]) < r["sleep_s"] + 180, "motivo_espera": r["wait_reason"],
             "proximo_turno_em_s": max(0, round(float(r["next_in"]))), "ultimo_turno_em": r["last_turn_at"].isoformat() if r["last_turn_at"] else None,
             "ultimo_turno_por": r["ultimo_por"], "funcionario_da_vez": r["da_vez"],
-            "limites": {"chamadas": config.DAILY_CALL_LIMIT, "tokens": config.DAILY_TOKEN_LIMIT}, "isolamento_ferramentas": r["isolation"]}
+            "limites": {"chamadas": config.DAILY_CALL_LIMIT, "tokens": config.DAILY_TOKEN_LIMIT}, "isolamento_ferramentas": {"ligadas": r["tools_enabled"], "motivo": r["tools_reason"], "o_que_falta": r["tools_help"], "backend": r["tools_backend"], "detalhe": r["isolation"]}}
 
 
 @app.get("/api/employees", dependencies=[Depends(read_auth)])

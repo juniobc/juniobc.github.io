@@ -136,7 +136,7 @@ def test_migrations_idempotent_and_clean_old_empty_usage(url, monkeypatch):
     c.execute("INSERT INTO employees(slug,name,role,area,instructions,model) VALUES ('a','A','CEO','D','x','m'),('b','B','CEO','D','x','m')")
     c.execute("INSERT INTO usage_log(employee_id,model,prompt_tokens,completion_tokens) SELECT id,'m',100,3500 FROM employees, generate_series(1,2)")
     c.execute("INSERT INTO messages(from_id,body) SELECT id,'oi' FROM employees WHERE slug='b'")
-    assert migrate.migrate(c) == ["002_zera_uso_vazio.sql", "003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql"]
+    assert migrate.migrate(c) == ["002_zera_uso_vazio.sql", "003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql"]
     assert migrate.migrate(c) == []
     ok = c.execute("SELECT e.slug FROM usage_log u JOIN employees e ON e.id=u.employee_id WHERE u.ok GROUP BY 1").fetchall()
     assert [r["slug"] for r in ok] == ["b"]  # b tem mensagem gravada: chamadas dele eram úteis
@@ -210,7 +210,7 @@ def test_migration_003_cleans_duplicates(url, monkeypatch):
         c.execute("INSERT INTO products(name,file_path) VALUES ('Toolkit X','a.txt')")
         c.execute("INSERT INTO tasks(title) VALUES ('Pesquisar copy')")
     c.execute("INSERT INTO tasks(title,details) VALUES ('Receber fontes','mandar os arquivos .txt fonte')")
-    assert migrate.migrate(c) == ["003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql"]
+    assert migrate.migrate(c) == ["003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql"]
     assert c.execute("SELECT COUNT(*) AS n FROM products").fetchone()["n"] == 1
     assert c.execute("SELECT COUNT(*) AS n FROM tasks WHERE status='open'").fetchone()["n"] == 1
 
@@ -396,7 +396,7 @@ def test_migration_006_archives_existing_messages(url, monkeypatch):
     for f in files[:5]:
         c.execute(f.read_text()); c.execute("INSERT INTO schema_migrations(name) VALUES (%s)", (f.name,))
     c.execute("INSERT INTO messages(body) VALUES ('velha 1'),('velha 2')")
-    assert migrate.migrate(c) == ["006_secoes_arquivo.sql", "007_ferramentas.sql"]
+    assert migrate.migrate(c) == ["006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql"]
     c.execute("INSERT INTO messages(body) VALUES ('nova')")
     assert [r["body"] for r in c.execute("SELECT body FROM messages WHERE NOT archived").fetchall()] == ["nova"]
 
@@ -415,6 +415,17 @@ def test_api_products_show_sections_progress(conn, monkeypatch):
 
 
 # ---------- fábrica de ferramentas: validação e isolamento ----------
+
+@pytest.fixture()
+def gate_on():
+    """Liga o portão com o autoteste REAL; sem isolamento neste ambiente, pula. Sempre volta a fechar no fim."""
+    from meridiano.engine import sandbox
+    g = sandbox.refresh_gate()
+    if not g["enabled"]:
+        pytest.skip("isolamento indisponível neste ambiente: " + g["reason"])
+    yield g
+    sandbox._GATE.update(enabled=False, backend="", reason="fechado após o teste")
+
 
 GOOD = "import json\ndef run(args):\n    return {'soma': sum(args.get('n', [])), 'txt': json.dumps([1])}\n"
 GOOD_TESTS = "def test_soma():\n    assert run({'n': [1, 2]})['soma'] == 3\n\ndef test_vazio():\n    assert run({})['soma'] == 0\n"
@@ -445,7 +456,7 @@ def test_validation_blocks_dangerous_code(code, fragment):
     assert not ok and any(fragment in p for p in problems), problems
 
 
-def test_good_tool_runs_isolated_and_tests_pass():
+def test_good_tool_runs_isolated_and_tests_pass(gate_on):
     from meridiano.engine import sandbox
     assert sandbox.validate(GOOD)[0]
     assert sandbox.execute(GOOD, {"n": [4, 5]})["result"]["soma"] == 9
@@ -455,7 +466,7 @@ def test_good_tool_runs_isolated_and_tests_pass():
     assert not bad["ok"] and "AssertionError" in bad["error"]
 
 
-def test_runtime_blocks_module_escape_routes():
+def test_runtime_blocks_module_escape_routes(gate_on):
     """Passam pela AST (nomes comuns), mas o runtime restrito impede o acesso."""
     from meridiano.engine import sandbox
     via_urllib = "import urllib.parse as u\ndef run(a):\n    return str(u.sys)\n"
@@ -469,7 +480,7 @@ def test_runtime_blocks_module_escape_routes():
     assert ok["ok"] and ok["result"] == "a%20b"
 
 
-def test_environment_is_empty_for_the_child(monkeypatch):
+def test_environment_is_empty_for_the_child(gate_on, monkeypatch):
     from meridiano.engine import sandbox
     monkeypatch.setenv("NOUS_API_KEY", "segredo-nao-pode-vazar")
     seen = {}
@@ -483,7 +494,7 @@ def test_environment_is_empty_for_the_child(monkeypatch):
     assert seen["env"] == {} and seen["cwd"] and "meridiano_tool_" in seen["cwd"]
 
 
-def test_timeout_and_memory_and_output_limits(monkeypatch):
+def test_timeout_and_memory_and_output_limits(gate_on, monkeypatch):
     from meridiano.engine import sandbox, config
     monkeypatch.setattr(config, "TOOL_TIMEOUT_SECONDS", 2)
     r = sandbox.execute("def run(a):\n    while True:\n        pass\n")
@@ -503,7 +514,7 @@ def _mk(conn, name, role):
     return conn.execute("SELECT * FROM employees WHERE name=%s", (name,)).fetchone()
 
 
-def test_tool_factory_cross_approval_flow(conn, tmp_path, monkeypatch):
+def test_tool_factory_cross_approval_flow(gate_on, conn, tmp_path, monkeypatch):
     from meridiano.engine import tools, config
     monkeypatch.setattr(config, "WORKSPACE_DIR", str(tmp_path))
     ceo = _ceo(conn)
@@ -536,7 +547,7 @@ def test_tool_factory_cross_approval_flow(conn, tmp_path, monkeypatch):
     assert conn.execute("SELECT COUNT(*) AS n FROM custom_tool_versions").fetchone()["n"] == 3
 
 
-def test_tool_factory_rejections_and_level_c(conn, tmp_path, monkeypatch):
+def test_tool_factory_rejections_and_level_c(gate_on, conn, tmp_path, monkeypatch):
     from meridiano.engine import tools, config
     monkeypatch.setattr(config, "WORKSPACE_DIR", str(tmp_path))
     dev = _mk(conn, "Davi", "Analista")
@@ -565,14 +576,15 @@ def test_tool_factory_rejections_and_level_c(conn, tmp_path, monkeypatch):
 
 def test_engine_reports_isolation(conn, monkeypatch):
     monkeypatch.setenv("MERIDIANO_API_TOKEN", "t")
-    from meridiano.engine import pacing
+    from meridiano.engine import pacing, sandbox
     from meridiano.api import main
     ceo = _ceo(conn)
     pacing.beat(conn, current=ceo["id"], delay=60)
+    monkeypatch.setattr(sandbox, "refresh_gate", lambda: {"enabled": False, "reason": "unshare negado: Operation not permitted", "help": "liberar user namespaces", "backend": "", "detail": "", "checked_at": None})
     pacing.record_isolation(conn)
     main._conn = conn
-    r = TestClient(main.app).get("/api/engine", headers={"X-Token": "t"}).json()
-    assert "subprocesso isolado" in r["isolamento_ferramentas"] and ("rede BLOQUEADA" in r["isolamento_ferramentas"] or "NÃO bloqueada" in r["isolamento_ferramentas"])
+    r = TestClient(main.app).get("/api/engine", headers={"X-Token": "t"}).json()["isolamento_ferramentas"]
+    assert r["ligadas"] is False and "Operation not permitted" in r["motivo"] and "user namespaces" in r["o_que_falta"]
 
 
 def test_plan_renames_old_product_without_duplicating(conn):
@@ -585,3 +597,117 @@ def test_plan_renames_old_product_without_duplicating(conn):
     sec = conn.execute("SELECT title,content FROM product_sections WHERE product_id=%s AND position=7", (pid,)).fetchone()
     assert sec["title"] == "Metas e planejamento anual" and sec["content"] == "texto da seção 7"   # título novo, texto preservado
     assert not conn.execute("SELECT 1 FROM products WHERE name ILIKE '%2025%'").fetchone()
+
+
+# ---------- portão que falha fechado ----------
+
+CLOSED = dict(enabled=False, backend="", reason="fechado para o teste", help="", detail="")
+
+
+def test_gate_is_closed_by_default_and_everything_refuses(conn, tmp_path, monkeypatch):
+    from meridiano.engine import sandbox, tools, config
+    monkeypatch.setattr(config, "WORKSPACE_DIR", str(tmp_path))
+    monkeypatch.setitem(sandbox._GATE, "enabled", False)
+    ceo = _ceo(conn)
+    pres = conn.execute("SELECT * FROM employees WHERE slug='presidente'").fetchone()
+    dev = _mk(conn, "Davi", "Analista")
+    r = sandbox.execute(GOOD)
+    assert r["ok"] is False and r["error"] == "ferramentas desligadas: isolamento indisponível"
+    out = tools.run_tool(conn, dev, "propose_tool", {"name": "somador", "description": "d", "python_code": GOOD, "tests_code": GOOD_TESTS, "reason": "contas"})
+    assert "RASCUNHO" in out and "desligadas" in out
+    assert conn.execute("SELECT status FROM custom_tools WHERE name='somador'").fetchone()["status"] == "rascunho"
+    assert conn.execute("SELECT COUNT(*) AS n FROM tool_runs").fetchone()["n"] == 0            # nada foi executado
+    assert tools.run_tool(conn, pres, "approve_tool", {"name": "somador", "approve": True, "note": "li o código"}) == "ferramentas desligadas: isolamento indisponível"
+    assert tools.run_tool(conn, dev, "run_custom_tool", {"name": "somador"}) == "ferramentas desligadas: isolamento indisponível"
+    # código perigoso continua sendo recusado na validação mesmo com o portão fechado
+    bad = tools.run_tool(conn, dev, "propose_tool", {"name": "ruim", "description": "d", "python_code": "import os\ndef run(a):\n    return 1\n", "tests_code": GOOD_TESTS, "reason": "x"})
+    assert "recusada" in bad
+    # ferramenta que já estava ATIVA também para quando o portão fecha
+    conn.execute("UPDATE custom_tools SET status='ativa' WHERE name='somador'")
+    assert tools.run_tool(conn, dev, "run_custom_tool", {"name": "somador"}).startswith("ferramentas desligadas")
+
+
+def test_drafts_are_processed_when_gate_opens(gate_on, conn, tmp_path, monkeypatch):
+    from meridiano.engine import sandbox, tools, config, pacing
+    monkeypatch.setattr(config, "WORKSPACE_DIR", str(tmp_path))
+    dev = _mk(conn, "Davi", "Analista")
+    sandbox._GATE.update(CLOSED)
+    tools.run_tool(conn, dev, "propose_tool", {"name": "somador", "description": "d", "python_code": GOOD, "tests_code": GOOD_TESTS, "reason": "contas"})
+    tools.run_tool(conn, dev, "propose_tool", {"name": "quebrada", "description": "d", "python_code": "def run(a):\n    return {'soma': 0}\n",
+                                                "tests_code": "def test_a():\n    assert run({})['soma'] == 1\n", "reason": "x"})
+    assert conn.execute("SELECT COUNT(*) AS n FROM custom_tools WHERE status='rascunho'").fetchone()["n"] == 2
+    ceo = _ceo(conn)
+    pacing.beat(conn, current=ceo["id"], delay=60)
+    pacing.record_isolation(conn)                                                    # autoteste real: abre e processa os rascunhos
+    st = {r["name"]: r["status"] for r in conn.execute("SELECT name,status FROM custom_tools").fetchall()}
+    assert st == {"somador": "revisao", "quebrada": "recusada"}
+    assert conn.execute("SELECT tools_enabled FROM engine_status").fetchone()["tools_enabled"] is True
+
+
+@pytest.mark.parametrize("stderr,code,reason_part,help_part", [
+    ("unshare: unshare failed: Operation not permitted", 1, "Operation not permitted", "apparmor_restrict_unprivileged_userns"),
+    ("", 97, "mount negado", "bubblewrap"),
+    ("unshare: write failed /proc/self/uid_map: Operation not permitted", 1, "uid_map", "usuário Linux separado"),
+])
+def test_gate_reports_exact_reason_and_what_admin_must_do(monkeypatch, stderr, code, reason_part, help_part):
+    from meridiano.engine import sandbox
+    monkeypatch.setattr(sandbox, "_backends", lambda: ["unshare"])
+    monkeypatch.setattr(sandbox, "_run_probe", lambda *a, **k: (None, sandbox._help_for(stderr, code)))
+    g = sandbox.refresh_gate()
+    assert g["enabled"] is False and reason_part in g["reason"] and help_part in g["help"], g
+
+
+def test_gate_without_any_backend(monkeypatch):
+    from meridiano.engine import sandbox
+    monkeypatch.setattr(sandbox, "_backends", lambda: [])
+    g = sandbox.refresh_gate()
+    assert not g["enabled"] and "nem unshare nem bubblewrap" in g["reason"] and "instalar" in g["help"]
+
+
+CLEAN = {"net_conectou": [False, False], "canario_legivel": False, "env_file_legivel": False, "ocultos_nao_vazios": {},
+         "pids_visiveis": 1, "environ_alheio_legivel": 0, "env_chaves": ["PWD"], "escreveu_tmp": True}
+
+
+@pytest.mark.parametrize("patch,fragment", [
+    ({"net_conectou": [False, True]}, "rede NÃO bloqueada"),
+    ({"canario_legivel": True}, "legíveis"),
+    ({"env_file_legivel": True}, "legíveis"),
+    ({"ocultos_nao_vazios": {"/home/empresa": 3}}, "têm conteúdo"),
+    ({"environ_alheio_legivel": 2}, "/proc"),
+    ({"env_chaves": ["PWD", "NOUS_API_KEY"]}, "NOUS_API_KEY"),
+    ({"escreveu_tmp": False}, "escrever"),
+])
+def test_gate_closes_if_any_probe_fails(monkeypatch, patch, fragment):
+    from meridiano.engine import sandbox
+    monkeypatch.setattr(sandbox, "_backends", lambda: ["unshare"])
+    monkeypatch.setattr(sandbox, "_run_probe", lambda *a, **k: (dict(CLEAN, **patch), None))
+    g = sandbox.refresh_gate()
+    assert not g["enabled"] and fragment in g["reason"], g
+
+
+def test_gate_opens_only_when_every_probe_is_clean(monkeypatch):
+    from meridiano.engine import sandbox
+    monkeypatch.setattr(sandbox, "_backends", lambda: ["unshare"])
+    monkeypatch.setattr(sandbox, "_run_probe", lambda *a, **k: (dict(CLEAN), None))
+    g = sandbox.refresh_gate()
+    assert g["enabled"] and g["backend"] == "unshare"
+    sandbox._GATE.update(CLOSED)
+
+
+def test_probe_really_detects_a_non_isolated_process(tmp_path):
+    """A sonda rodando SEM envoltório (como num servidor sem isolamento) precisa ser reprovada."""
+    import subprocess as sp, sys, json
+    from meridiano.engine import sandbox
+    canary = tmp_path / "canario"
+    canary.write_text("segredo")
+    out = sp.run([sys.executable, "-I", sandbox.PROBE], input=json.dumps({"hide": [str(tmp_path)], "canary": str(canary), "env_file": None}).encode(),
+                 capture_output=True, cwd=str(tmp_path), env={}, timeout=30)
+    fails = sandbox._judge(json.loads(out.stdout))
+    assert any("legíveis" in f for f in fails) and any("têm conteúdo" in f for f in fails), fails
+
+
+def test_real_selftest_passes_here_or_skips(gate_on):
+    from meridiano.engine import sandbox
+    g = sandbox.gate()
+    assert g["enabled"] and g["backend"] in ("unshare", "bwrap")
+    assert not os.path.exists(os.path.join(os.path.expanduser("~"), ".meridiano_isolation_canary"))   # canário removido
