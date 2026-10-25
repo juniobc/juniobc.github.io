@@ -42,7 +42,8 @@ def health():
 def state():
     c = conn()
     calls, tokens = llm.usage_today(c)
-    sales = c.execute("SELECT COUNT(*) AS n FROM ledger WHERE kind='receita'").fetchone()["n"]
+    # vendas = receitas menos as revertidas por reembolso total ou chargeback
+    sales = c.execute("SELECT (SELECT COUNT(*) FROM ledger WHERE kind='receita') - (SELECT COUNT(*) FROM ledger WHERE kind='despesa' AND external_ref ~ ':(reembolso|chargeback)$') AS n").fetchone()["n"]
     n = c.execute("SELECT COUNT(*) AS n FROM employees WHERE active").fetchone()["n"]
     falhas, ultimo_erro = llm.failures_today(c)
     reset = c.execute("SELECT date_trunc('day', now()) + interval '1 day' AS r").fetchone()["r"]
@@ -158,6 +159,14 @@ def opportunities():
         "FROM opportunities o LEFT JOIN employees c ON c.id=o.created_by ORDER BY CASE o.status WHEN 'teste' THEN 0 WHEN 'ativa' THEN 1 WHEN 'ideia' THEN 2 ELSE 3 END, o.id DESC").fetchall()
 
 
+@app.get("/api/orders", dependencies=[Depends(read_auth)])
+def orders():
+    """Pedidos recentes, sem nenhum dado pessoal do comprador."""
+    return conn().execute(
+        "SELECT o.id,p.name AS produto,o.status,o.amount_cents,o.gross_cents,o.fee_cents,o.net_cents,o.refunded_cents,o.test,o.created_at,o.paid_at "
+        "FROM orders o JOIN products p ON p.id=o.product_id ORDER BY o.id DESC LIMIT 50").fetchall()
+
+
 @app.get("/api/ledger", dependencies=[Depends(read_auth)])
 def ledger():
     return conn().execute("SELECT id,kind,amount_cents,description,source,created_at FROM ledger ORDER BY id DESC LIMIT 100").fetchall()
@@ -228,9 +237,10 @@ def add_entry(e: Entry):
     return {"id": r["id"], "caixa": db.cash_cents(c) / 100}
 
 
-from . import store_routes  # noqa: E402
+from . import pay_routes, store_routes  # noqa: E402
 
 app.include_router(store_routes.router)
+app.include_router(pay_routes.router)
 store_routes.register(app, read_auth, admin_auth, conn)
 
 _web = pathlib.Path(__file__).parent.parent / "web" / "dist"

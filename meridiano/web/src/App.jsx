@@ -50,7 +50,7 @@ function MpTokenCard({ onSaved }) {
 
 export default function App() {
   const [auth, setAuth] = useState(!!getToken());
-  const [d, setD] = useState({ state: null, emps: [], msgs: [], tasks: [], prods: [], ledger: [], reqs: [], acts: [], hist: [], engine: null, loja: [], opps: [] });
+  const [d, setD] = useState({ state: null, emps: [], msgs: [], tasks: [], prods: [], ledger: [], reqs: [], acts: [], hist: [], engine: null, loja: [], opps: [], orders: [] });
   const [err, setErr] = useState('');
   const [loginErr, setLoginErr] = useState('');
   const [tab, setTab] = useState(0);
@@ -71,9 +71,9 @@ export default function App() {
     let on = true;
     const load = async () => {
       try {
-        const [state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps] = await Promise.all(
-          ['state', 'employees', 'messages?limit=40', 'tasks', 'products', 'ledger', 'owner-requests', 'activity?limit=30', 'history', 'engine', 'store/products', 'opportunities'].map(api));
-        if (on) { setD({ state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps }); setErr(''); }
+        const [state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps, orders] = await Promise.all(
+          ['state', 'employees', 'messages?limit=40', 'tasks', 'products', 'ledger', 'owner-requests', 'activity?limit=30', 'history', 'engine', 'store/products', 'opportunities', 'orders'].map(api));
+        if (on) { setD({ state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps, orders }); setErr(''); }
       } catch (e) {
         if (e.message === '401') { setToken(''); setLoginErr('Token inválido. Confira e tente de novo.'); setAuth(false); } else setErr('Sem conexão com o servidor.');
       }
@@ -164,6 +164,13 @@ export default function App() {
 
       {tab === 4 && <>
         <p className="note">O caixa começa em R$ 0,00 e só muda quando o dono registra um valor realmente recebido. Falas dos agentes nunca contam.</p>
+        <h2>Pedidos</h2>
+        <ul className="feed">{d.orders.map((o) => (
+          <li key={o.id}><b>#{o.id} · {o.produto}</b> <small>({o.status}{o.test ? ' · TESTE, não entra no caixa' : ''})</small><br />
+            {brl(o.amount_cents / 100)}{o.net_cents != null ? ` · líquido ${brl(o.net_cents / 100)}` : ''}<br />
+            <small>{new Date(o.created_at).toLocaleString('pt-BR')}</small></li>))}
+          {!d.orders.length && <li className="note">Nenhum pedido ainda.</li>}</ul>
+        <h2>Lançamentos no caixa</h2>
         <ul className="feed">{d.ledger.map((l) => (
           <li key={l.id}><b>{l.kind === 'receita' ? '+' : '−'} {brl(l.amount_cents / 100)}</b> · {l.description}<br />
             <small>{new Date(l.created_at).toLocaleString('pt-BR')} · {l.source}</small></li>))}

@@ -50,3 +50,11 @@ printf '%s\n' '{"seller_name": "Nome Completo", "contact_email": "contato@exempl
 - O motor lê os arquivos e reverifica o token em `api.mercadopago.com/users/me` **a cada 60 s**; a API também reverifica ao consultar o status. O pedido ao dono fecha sozinho quando o token e a identificação existem.
 - `GET /api/secrets/mp-token` (token de leitura) mostra `configurado`, `modo`, `verificado`, `verificado_em`, `detalhe` e `problema`. **Nunca** mostra o token.
 - Nenhum agente nem ferramenta lê essa pasta: ela fica sob a home, que o isolamento das ferramentas esconde.
+
+## Checkout do Mercado Pago (já no código; liga quando a entrega existir)
+- Cada pedido manda o `notification_url` (`PUBLIC_BASE_URL` + `/api/mp/webhook`) e as páginas de retorno ao Mercado Pago; **não é preciso configurar nada no painel deles**. `PUBLIC_BASE_URL` (padrão: `https://meridiano.163-176-9-70.sslip.io`) é o endereço público HTTPS que o Caddy expõe.
+- **Segurança do aviso:** o aviso do Mercado Pago é só uma dica. A venda só existe se a API do Mercado Pago, consultada com o nosso token, devolver `approved` com o mesmo valor, moeda BRL e o pedido nosso. Um aviso forjado não gera venda.
+- **Assinatura (opcional, recomendada):** em *Suas integrações > Webhooks* o Mercado Pago mostra a "Assinatura secreta". Se o administrador a gravar em `~/meridiano/secrets/mp-webhook-secret` (chmod 600), todo aviso passa a exigir `x-signature` válida; sem o arquivo, a confirmação pela API continua sendo a barreira.
+- Tokens de teste (`TEST-...`) usam o sandbox e **nunca** entram no caixa.
+- Reembolso e chargeback viram lançamentos de despesa no caixa (reembolsos parciais, pela diferença). A taxa do Mercado Pago é lançada como despesa quando a API a informa.
+- Nenhum dado pessoal do comprador é guardado: só o id do pagamento e os valores.

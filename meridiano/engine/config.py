@@ -61,3 +61,5 @@ WORKERS = int(env("WORKERS", "3"))                 # turnos em paralelo (nunca d
 MIN_TEAM = int(env("MIN_TEAM", "6"))               # meta mínima de funcionários ativos
 TEAM_REVIEW_EVERY = int(env("TEAM_REVIEW_EVERY", "30"))   # turnos entre revisões de equipe
 MAX_TASKS_PER_PERSON = int(env("MAX_TASKS_PER_PERSON", "3"))
+PUBLIC_BASE_URL = env("PUBLIC_BASE_URL", "https://meridiano.163-176-9-70.sslip.io").rstrip("/")   # endereço público da loja (webhook e retorno do pagamento)
+MAX_OPEN_ORDERS = int(env("MAX_OPEN_ORDERS", "50"))   # pedidos abertos em 10 min antes de recusar novos (evita encher o banco)
