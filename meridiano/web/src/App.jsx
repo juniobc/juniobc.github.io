@@ -43,7 +43,7 @@ function MpTokenCard({ onSaved }) {
       <input type="email" autoComplete="email" placeholder="E-mail de contato (aparece na loja)" value={email} onChange={(e) => setEmail(e.target.value)} style={{ width: '100%', marginBottom: 6 }} />
       <button disabled={busy || !admin || !(tok || (nome && email))} onClick={send}>{busy ? 'Enviando...' : 'Enviar com segurança'}</button>
       {msg && <p className="note">{msg}</p>}
-      <p className="note">O token vai direto para o servidor, é guardado em arquivo protegido e nunca é mostrado de volta. Nenhum agente tem acesso a ele. O nome e o e-mail ficam públicos na loja. O Mercado Pago só recebe os pagamentos: sacar o dinheiro continua sendo com você.</p>
+      <p className="note">O token vai direto para o servidor, é guardado em arquivo protegido e nunca é mostrado de volta. Nenhum agente tem acesso a ele. O nome e o e-mail ficam públicos na loja. O Mercado Pago só recebe os pagamentos: sacar o dinheiro continua sendo com você. Se preferir, quem administra o servidor pode criar o arquivo <code>~/meridiano/secrets/mp-token</code> e este cartão some sozinho.</p>
     </div>
   );
 }
