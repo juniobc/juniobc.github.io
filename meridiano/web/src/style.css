@@ -4,7 +4,7 @@
 h1{font-size:20px;margin:8px 0}h2{font-size:16px;margin:20px 0 8px}
 .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 .stats div{background:var(--card);border-radius:8px;padding:10px}.stats b{display:block;font-size:20px}.stats span{color:var(--mute);font-size:12px}
-canvas{width:100%;image-rendering:pixelated;background:#142522;border-radius:8px;display:block}
+canvas{width:100%;image-rendering:pixelated;background:#142522;border-radius:8px;display:block;touch-action:manipulation}
 .card{background:var(--card);border-radius:8px;padding:10px 12px;margin:10px 0}
 .feed{list-style:none;padding:0;margin:0}.feed li{padding:8px 0;border-bottom:1px solid #ffffff14}
 .feed small{color:var(--mute)}.note{color:var(--mute);font-size:12px}

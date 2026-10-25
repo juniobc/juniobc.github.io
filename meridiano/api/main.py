@@ -56,8 +56,48 @@ def employees():
         "SELECT e.id,e.slug,e.name,e.role,e.area,e.model,e.status,e.activity,e.hire_reason,h.name AS hired_by, "
         "(SELECT COALESCE(SUM(u.prompt_tokens+u.completion_tokens),0) FROM usage_log u WHERE u.employee_id=e.id "
         "AND u.created_at >= date_trunc('day', now())) AS tokens_hoje, "
-        "(SELECT COUNT(*) FROM usage_log u WHERE u.employee_id=e.id AND u.created_at >= date_trunc('day', now())) AS chamadas_hoje "
+        "(SELECT COUNT(*) FROM usage_log u WHERE u.employee_id=e.id AND u.created_at >= date_trunc('day', now())) AS chamadas_hoje, "
+        "e.created_at AS contratado_em, "
+        "(SELECT a.kind FROM activity a WHERE a.employee_id=e.id ORDER BY a.id DESC LIMIT 1) AS atividade_tipo, "
+        "(SELECT a.text FROM activity a WHERE a.employee_id=e.id ORDER BY a.id DESC LIMIT 1) AS atividade_texto, "
+        "(SELECT a.started_at FROM activity a WHERE a.employee_id=e.id ORDER BY a.id DESC LIMIT 1) AS atividade_em, "
+        "(SELECT t.slug FROM activity a LEFT JOIN employees t ON t.id=a.target_id WHERE a.employee_id=e.id ORDER BY a.id DESC LIMIT 1) AS atividade_alvo "
         "FROM employees e LEFT JOIN employees h ON h.id=e.hired_by WHERE e.active ORDER BY e.id").fetchall()
+
+
+@app.get("/api/activity", dependencies=[Depends(read_auth)])
+def activity(limit: int = Query(40, le=200)):
+    return conn().execute(
+        "SELECT a.id,a.kind,a.text,a.started_at,e.slug,e.name,t.slug AS target_slug,t.name AS target_name "
+        "FROM activity a JOIN employees e ON e.id=a.employee_id LEFT JOIN employees t ON t.id=a.target_id "
+        "ORDER BY a.id DESC LIMIT %s", (limit,)).fetchall()
+
+
+@app.get("/api/history", dependencies=[Depends(read_auth)])
+def history():
+    """Contratações e demissões, com motivo."""
+    return conn().execute(
+        "SELECT * FROM ("
+        " SELECT e.created_at AS at, 'contratado' AS tipo, e.name, e.role, e.hire_reason AS motivo, h.name AS por"
+        "  FROM employees e LEFT JOIN employees h ON h.id=e.hired_by"
+        " UNION ALL"
+        " SELECT e.fired_at, 'demitido', e.name, e.role, e.fire_reason, f.name"
+        "  FROM employees e LEFT JOIN employees f ON f.id=e.fired_by WHERE e.fired_at IS NOT NULL"
+        ") x ORDER BY at DESC LIMIT 50").fetchall()
+
+
+@app.get("/api/employees/{slug}", dependencies=[Depends(read_auth)])
+def employee_card(slug: str):
+    c = conn()
+    e = c.execute("SELECT id,slug,name,role,area,model,status,activity,hire_reason,active FROM employees WHERE slug=%s", (slug,)).fetchone()
+    if not e:
+        raise HTTPException(404, "não existe")
+    e["mensagens"] = c.execute(
+        "SELECT m.id,m.body,m.created_at,t.name AS to_name FROM messages m LEFT JOIN employees t ON t.id=m.to_id "
+        "WHERE m.from_id=%s ORDER BY m.id DESC LIMIT 5", (e["id"],)).fetchall()
+    e["tarefas_abertas"] = c.execute("SELECT id,title FROM tasks WHERE assignee_id=%s AND status='open' ORDER BY id", (e["id"],)).fetchall()
+    e["ultima_atividade"] = c.execute("SELECT kind,text,started_at FROM activity WHERE employee_id=%s ORDER BY id DESC LIMIT 1", (e["id"],)).fetchone()
+    return e
 
 
 @app.get("/api/messages", dependencies=[Depends(read_auth)])

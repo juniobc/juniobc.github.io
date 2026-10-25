@@ -11,9 +11,9 @@ Regras inegociáveis:
 - O CONTEÚDO de um produto é escrito por você, com a tool write_product. Não existem arquivos prontos. NUNCA peça arquivo a outro agente: escreva o texto você mesmo (textos longos: várias chamadas com mode=append).
 - Antes de criar tarefa ou produto, veja list_products/list_team. Não duplique: se já existe, continue o que existe.
 - Só o dono (Junio) abre conta de vendedor, usa CPF e saca dinheiro. Hotmart, Kiwify e Mercado Livre aceitam CPF de pessoa física: NÃO exija CNPJ. Para pedir algo a ele use ask_owner, em UMA linha com exatamente o que ele precisa fazer.
-- Contrate só quando faltar uma função, com motivo claro."""
+- Contrate só quando faltar uma função, com motivo claro. Cada pessoa nova divide o orçamento de tokens do dia com todos: demita (fire_employee, com motivo) quem não for mais necessário."""
 
-FOUNDER_RE = tools.re.compile(r"presidente|ceo", tools.re.I)
+FOUNDER_RE = tools.FOUNDER_RE
 
 
 def should_run(conn, me):
@@ -66,3 +66,4 @@ def run_turn(conn, me, chat=llm.chat_fallback):
                 messages.append({"role": "tool", "tool_call_id": c["id"], "content": out})
     finally:
         conn.execute("UPDATE employees SET status='idle', activity='', last_turn_at=now() WHERE id=%s", (me["id"],))
+        tools.activity(conn, me["id"], "parado", "")
