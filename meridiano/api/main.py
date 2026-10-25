@@ -196,6 +196,9 @@ def set_mp_token(body: MPToken):
 
 @app.get("/api/secrets/mp-token", dependencies=[Depends(read_auth)])
 def mp_token_status():
+    """O que está configurado agora (painel ou arquivo no servidor). A reverificação no Mercado Pago roda em segundo plano."""
+    secrets_store.sync_owner_request(conn())
+    secrets_store.refresh_meta_async()
     return secrets_store.status()
 
 

@@ -33,3 +33,20 @@ O Junio entrega a chave nova da Nous; ela vai só em `~/meridiano/meridiano.env`
 
 ## O que ainda depende de root (Spark)
 Só o que está fora do usuário `empresa`: Caddy/HTTPS (`meridiano.163-176-9-70.sslip.io` → `127.0.0.1:8100`), firewall da Oracle e portas. Já está feito.
+
+
+## Pagamentos e loja: dois caminhos para entregar o token (um só basta)
+O Junio precisa entregar **uma vez** o Access Token do Mercado Pago (Credenciais de produção) e a identificação do vendedor (nome e e-mail de contato, exigência legal).
+
+**(a) Painel.** O cartão "Pedidos para você" tem os campos. Exige o `MERIDIANO_ADMIN_TOKEN` (está no `meridiano.env`).
+
+**(b) Arquivos no servidor**, como o usuário `empresa`, sem reiniciar nada:
+```
+mkdir -p ~/meridiano/secrets && chmod 700 ~/meridiano/secrets
+printf '%s\n' 'APP_USR-...o-token...' > ~/meridiano/secrets/mp-token && chmod 600 ~/meridiano/secrets/mp-token
+printf '%s\n' '{"seller_name": "Nome Completo", "contact_email": "contato@exemplo.com.br"}' > ~/meridiano/secrets/store.json && chmod 600 ~/meridiano/secrets/store.json
+```
+- O arquivo `mp-token` aceita o token puro ou `MP_ACCESS_TOKEN=...`, com ou sem aspas. Permissões frouxas são corrigidas sozinhas (pasta 700, arquivos 600).
+- O motor lê os arquivos e reverifica o token em `api.mercadopago.com/users/me` **a cada 60 s**; a API também reverifica ao consultar o status. O pedido ao dono fecha sozinho quando o token e a identificação existem.
+- `GET /api/secrets/mp-token` (token de leitura) mostra `configurado`, `modo`, `verificado`, `verificado_em`, `detalhe` e `problema`. **Nunca** mostra o token.
+- Nenhum agente nem ferramenta lê essa pasta: ela fica sob a home, que o isolamento das ferramentas esconde.

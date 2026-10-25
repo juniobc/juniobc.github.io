@@ -21,7 +21,7 @@ def main():
     seed.seed(conn)
     seed.refresh_instructions(conn)
     plan.ensure(conn)
-    secrets_store.sync_owner_request(conn)
+    secrets_store.refresh(conn)
     g = pacing.record_isolation(conn)
     log.info("ferramentas: %s", g["reason"])
     conn.execute("UPDATE employees SET model=%s WHERE model = ANY(%s)", (config.DEFAULT_ROTATION[0], list(config.AVOID)))
@@ -29,11 +29,14 @@ def main():
     last = 0
     backoff = 0
     next_gate = time.time() + config.GATE_CHECK_SECONDS
+    next_secrets = time.time() + secrets_store.REVERIFY_SECONDS
     while True:
         if time.time() >= next_gate:   # reverifica o isolamento a cada 5 min; qualquer falha desliga as ferramentas
             pacing.record_isolation(conn)
-            secrets_store.sync_owner_request(conn)
             next_gate = time.time() + config.GATE_CHECK_SECONDS
+        if time.time() >= next_secrets:   # token por arquivo: lê sem reiniciar e reverifica a cada 60 s
+            secrets_store.refresh(conn)
+            next_secrets = time.time() + secrets_store.REVERIFY_SECONDS
         me = pick(conn, last)
         errored = False
         done = None

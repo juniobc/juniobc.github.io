@@ -785,8 +785,8 @@ def test_api_token_is_stored_private_and_never_shown(conn, tmp_path, monkeypatch
     assert r.status_code == 200 and r.json()["configurado"] and r.json()["modo"] == "producao" and r.json()["verificado"]
     assert TOKEN not in r.text and "abcdef0123456789" not in r.text                                       # nunca devolvido
     # arquivo privado: pasta 700, arquivo 600
-    assert oct(os.stat(sec).st_mode & 0o777) == "0o700" and oct(os.stat(sec / "mp_access_token").st_mode & 0o777) == "0o600"
-    assert (sec / "mp_access_token").read_text() == TOKEN and not (sec / "mp_access_token.tmp").exists()
+    assert oct(os.stat(sec).st_mode & 0o777) == "0o700" and oct(os.stat(sec / "mp-token").st_mode & 0o777) == "0o600"
+    assert (sec / "mp-token").read_text() == TOKEN and not (sec / "mp-token.tmp").exists()
     # status não mostra o token
     st = c.get("/api/secrets/mp-token", headers={"X-Token": "leitura"})
     assert st.json()["configurado"] is True and TOKEN not in st.text
@@ -1051,3 +1051,111 @@ def test_api_lists_opportunities_with_status_order(conn, monkeypatch):
     r = c.get("/api/opportunities", headers={"X-Token": "leitura"}).json()
     assert [o["status"] for o in r] == ["teste", "ideia"] and r[0]["autor"] == "Rafael" and r[0]["metrics"] == "{}"
     assert c.get("/api/opportunities").status_code == 401
+
+
+# ---------- token por arquivo no servidor (caminho b) ----------
+
+@pytest.fixture()
+def secdir(tmp_path, monkeypatch):
+    from meridiano.engine import config, secrets_store as ss
+    d = tmp_path / "secrets"
+    d.mkdir(mode=0o700)
+    monkeypatch.setattr(config, "SECRETS_DIR", str(d))
+    monkeypatch.setattr(ss, "_state", {"fp": None, "last": 0.0})
+    return d
+
+
+def _verify_counter(monkeypatch, result=("ok", "token aceito pelo Mercado Pago")):
+    from meridiano.engine import secrets_store as ss
+    calls = []
+    monkeypatch.setattr(ss, "verify", lambda t: calls.append(t) or result)
+    return calls
+
+
+@pytest.mark.parametrize("conteudo", [TOKEN + "\n", "MP_ACCESS_TOKEN=" + TOKEN + "\n", "export X='" + TOKEN + "'", '"' + TOKEN + '"', "# comentario\n" + TOKEN])
+def test_admin_created_token_file_is_picked_up_without_restart(secdir, monkeypatch, conteudo):
+    from meridiano.engine import secrets_store as ss
+    calls = _verify_counter(monkeypatch)
+    assert ss.configured() is False and ss.status()["configurado"] is False
+    (secdir / "mp-token").write_text(conteudo)
+    os.chmod(secdir / "mp-token", 0o600)
+    assert ss.configured() is True and ss.read_token() == TOKEN
+    ss.refresh_meta()
+    st = ss.status()
+    assert st["configurado"] and st["verificado"] and st["modo"] == "producao" and st["problema"] is None and calls == [TOKEN]
+    assert TOKEN not in str(st) and "abcdef0123456789" not in str(st)
+
+
+def test_token_file_is_reverified_every_60_seconds_and_when_it_changes(secdir, monkeypatch):
+    from meridiano.engine import secrets_store as ss
+    calls = _verify_counter(monkeypatch)
+    (secdir / "mp-token").write_text(TOKEN)
+    ss.refresh_meta(); ss.refresh_meta(); ss.refresh_meta()
+    assert len(calls) == 1                                            # dentro de 60 s não repete
+    ss._state["last"] -= 61
+    ss.refresh_meta()
+    assert len(calls) == 2                                            # passou de 60 s
+    outro = "TEST-" + "x1y2z3w4" * 5
+    (secdir / "mp-token").write_text(outro)
+    ss.refresh_meta()
+    assert len(calls) == 3 and calls[-1] == outro and ss.status()["modo"] == "teste"      # arquivo mudou: reverifica na hora
+
+
+def test_token_file_problems_are_reported_not_hidden(secdir, monkeypatch):
+    from meridiano.engine import secrets_store as ss
+    calls = _verify_counter(monkeypatch, ("invalido", "o Mercado Pago recusou este token"))
+    (secdir / "mp-token").write_text("isso não é um token")
+    st = ss.status()
+    assert st["configurado"] is False and "não parece um Access Token" in st["problema"] and calls == []
+    (secdir / "mp-token").write_text(TOKEN)
+    ss.refresh_meta()
+    st = ss.status()
+    assert st["configurado"] and st["verificado"] is False and "recusou" in st["detalhe"]                # token presente, mas recusado: aparece
+    assert (secdir / "mp-token").exists()                                                               # nunca apaga o arquivo do administrador
+
+
+def test_loose_permissions_are_fixed_and_reported(secdir):
+    from meridiano.engine import secrets_store as ss
+    (secdir / "mp-token").write_text(TOKEN)
+    os.chmod(secdir / "mp-token", 0o644); os.chmod(secdir, 0o755)
+    assert ss.ensure_private() is True
+    assert oct(os.stat(secdir / "mp-token").st_mode & 0o777) == "0o600" and oct(os.stat(secdir).st_mode & 0o777) == "0o700"
+
+
+def test_legacy_file_name_still_works(secdir, monkeypatch):
+    from meridiano.engine import secrets_store as ss
+    _verify_counter(monkeypatch)
+    (secdir / "mp_access_token").write_text(TOKEN)
+    assert ss.configured() and ss.read_token() == TOKEN
+    (secdir / "mp-token").write_text("TEST-" + "k9l8m7n6" * 5)                                          # o nome novo tem prioridade
+    assert ss.read_token().startswith("TEST-")
+
+
+def test_server_files_close_the_owner_request_without_the_panel(conn, secdir, monkeypatch):
+    from meridiano.engine import secrets_store as ss, store
+    _verify_counter(monkeypatch)
+    ss.sync_owner_request(conn)
+    assert conn.execute("SELECT done FROM owner_requests").fetchone()["done"] is False
+    (secdir / "mp-token").write_text(TOKEN)
+    ss.refresh(conn)
+    assert conn.execute("SELECT done FROM owner_requests").fetchone()["done"] is False                    # falta a identificação
+    (secdir / "store.json").write_text('{"seller_name": "Nome Completo", "contact_email": "contato@exemplo.com.br"}')
+    ss.refresh(conn)
+    assert store.get_settings(conn) == {"seller_name": "Nome Completo", "contact_email": "contato@exemplo.com.br"}
+    assert conn.execute("SELECT done,resolution FROM owner_requests").fetchone() == {"done": True, "resolution": "token e identificação recebidos"}
+    # arquivo de identificação inválido não grava nada
+    (secdir / "store.json").write_text('{"seller_name": "N", "contact_email": "sem-arroba"}')
+    assert ss.import_store_file(conn) is False
+    assert store.get_settings(conn)["seller_name"] == "Nome Completo"
+
+
+def test_status_route_reflects_file_and_verifies_in_background(conn, secdir, monkeypatch):
+    from meridiano.engine import secrets_store as ss
+    c = _client(conn, monkeypatch)
+    _verify_counter(monkeypatch)
+    (secdir / "mp-token").write_text(TOKEN)
+    r = c.get("/api/secrets/mp-token", headers={"X-Token": "leitura"})
+    assert r.json()["configurado"] is True and TOKEN not in r.text
+    ss._thread.join(5)                                                                                    # reverificação em segundo plano
+    r = c.get("/api/secrets/mp-token", headers={"X-Token": "leitura"}).json()
+    assert r["verificado"] is True and r["modo"] == "producao" and r["permissoes_ok"] is True and r["problema"] is None
