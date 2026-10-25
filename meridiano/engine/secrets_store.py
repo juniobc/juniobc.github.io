@@ -92,6 +92,33 @@ def read_token():
     return t
 
 
+def sources():
+    """[(nome do arquivo, impressão do token ou None se ilegível)] dos arquivos de token que existem. Nunca devolve o token."""
+    out = []
+    for n in (TOKEN_FILE, LEGACY_FILE, JSON_FILE):
+        p = _path(n)
+        if os.path.isfile(p) and os.path.getsize(p) > 0:
+            try:
+                with open(p, encoding="utf-8") as f:
+                    t = _parse(f.read())
+                out.append((n, _fp(t) if TOKEN_RE.match(t) else None))
+            except OSError:
+                out.append((n, None))
+    return out
+
+
+def in_use():
+    """Nome do arquivo cujo token vale agora (o primeiro da ordem de prioridade), ou None."""
+    p = _token_file()
+    return os.path.basename(p) if p else None
+
+
+def conflict():
+    """True se há mais de um arquivo com tokens DIFERENTES (vale o primeiro; o painel avisa)."""
+    fps = {fp for _n, fp in sources() if fp}
+    return len(fps) > 1
+
+
 def problem():
     """None se está tudo certo ou se o arquivo não existe; texto se existe mas não presta."""
     p = _token_file()
@@ -230,6 +257,13 @@ def remove_token():
 
 def status():
     """Sem rede: o que está configurado agora. Nunca inclui o token nem pedaço dele."""
+    d = _status()
+    d["arquivo_em_uso"] = in_use()
+    d["aviso"] = "Há dois tokens diferentes em arquivos do servidor. Vale o primeiro da ordem: mp-token, mp_access_token, mercadopago.json. Apague o que não vale para evitar confusão." if conflict() else None
+    return d
+
+
+def _status():
     prob = problem()
     if not configured():
         return {"configurado": False, "modo": None, "verificado": False, "verificado_em": None, "detalhe": None, "problema": prob,

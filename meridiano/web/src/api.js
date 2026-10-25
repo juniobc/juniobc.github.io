@@ -3,6 +3,7 @@ export const setToken = (t) => { try { localStorage.setItem('mtoken', t); } catc
 // Administrador: sessão do Google (cookie HttpOnly) + cabeçalho X-CSRF. O token de recuperação do servidor é opcional e fica só nesta aba.
 let csrf = '';
 export const setCsrf = (c) => { csrf = c || ''; };
+export const getCsrf = () => csrf;
 export const getRecovery = () => { try { return sessionStorage.getItem('mrec') || ''; } catch { return ''; } };
 export const setRecovery = (t) => { try { t ? sessionStorage.setItem('mrec', t) : sessionStorage.removeItem('mrec'); } catch {} };
 export async function admin(method, path, body) {
@@ -24,7 +25,7 @@ export async function api(path) {
   return r.json();
 }
 export async function post(path) {
-  const r = await fetch('api/' + path, { method: 'POST', headers: { 'X-Token': getToken() } });
+  const r = await fetch('api/' + path, { method: 'POST', headers: { 'X-Token': getToken(), 'X-CSRF': csrf } });
   if (!r.ok) throw new Error(String(r.status));
   return r.json();
 }

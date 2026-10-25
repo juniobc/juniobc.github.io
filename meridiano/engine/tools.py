@@ -416,7 +416,8 @@ def _run_custom_tool(conn, me, args):
 
 def run_tool(conn, me, name, args):
     """Executa uma tool para o funcionário `me` (dict). Devolve texto (limitado)."""
-    out = cap(_run_tool(conn, me, name, args))
+    from . import owner_chat
+    out = owner_chat.defang(cap(_run_tool(conn, me, name, args)))   # nada que a tool devolva (web, colegas) imita o bloco do dono
     try:
         _record_activity(conn, me, name, args, out)
     except Exception:  # registrar atividade nunca derruba a tool
