@@ -303,11 +303,12 @@ def test_budget_fraction_and_state_fields(conn, monkeypatch):
 def test_limits_old_deploy_values_are_replaced(monkeypatch):
     import importlib
     from meridiano.engine import config
-    monkeypatch.setenv("DAILY_CALL_LIMIT", "300"); monkeypatch.setenv("DAILY_TOKEN_LIMIT", "400000")
-    c = importlib.reload(config)
-    assert (c.DAILY_CALL_LIMIT, c.DAILY_TOKEN_LIMIT) == (600, 1500000)
-    monkeypatch.setenv("DAILY_TOKEN_LIMIT", "3000000")
-    assert importlib.reload(config).DAILY_TOKEN_LIMIT == 3000000      # valor maior escolhido é respeitado
+    for old in (("300", "400000"), ("600", "1500000")):
+        monkeypatch.setenv("DAILY_CALL_LIMIT", old[0]); monkeypatch.setenv("DAILY_TOKEN_LIMIT", old[1])
+        c = importlib.reload(config)
+        assert (c.DAILY_CALL_LIMIT, c.DAILY_TOKEN_LIMIT) == (2000, 8000000)
+    monkeypatch.setenv("DAILY_TOKEN_LIMIT", "12000000")
+    assert importlib.reload(config).DAILY_TOKEN_LIMIT == 12000000     # valor maior escolhido é respeitado
     monkeypatch.delenv("DAILY_CALL_LIMIT"); monkeypatch.delenv("DAILY_TOKEN_LIMIT")
     importlib.reload(config)
 

@@ -30,8 +30,8 @@ if [ ! -f "$ROOT/meridiano.env" ]; then
   log "criado meridiano.env (preencher NOUS_API_KEY)"
 fi
 
-# migra só os limites antigos que o próprio deploy gravou (300 / 400000); valores escolhidos pelo Junio ficam como estão
-sed -i 's/^DAILY_CALL_LIMIT=300$/DAILY_CALL_LIMIT=600/; s/^DAILY_TOKEN_LIMIT=400000$/DAILY_TOKEN_LIMIT=1500000/' "$ROOT/meridiano.env" 2>/dev/null
+# migra só os limites antigos que o próprio deploy gravou (300/400000 e 600/1500000); valores escolhidos pelo Junio ficam como estão
+sed -i 's/^DAILY_CALL_LIMIT=\(300\|600\)$/DAILY_CALL_LIMIT=2000/; s/^DAILY_TOKEN_LIMIT=\(400000\|1500000\)$/DAILY_TOKEN_LIMIT=8000000/' "$ROOT/meridiano.env" 2>/dev/null
 
 healthy() {
   for _ in $(seq 1 30); do
