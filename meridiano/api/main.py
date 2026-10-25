@@ -143,6 +143,13 @@ def products():
         "FROM products p ORDER BY p.id DESC").fetchall()
 
 
+@app.get("/api/opportunities", dependencies=[Depends(read_auth)])
+def opportunities():
+    return conn().execute(
+        "SELECT o.id,o.idea,o.audience,o.how_it_earns,o.effort,o.risk,o.needs_owner,o.status,o.learning,o.metrics,o.created_at,o.updated_at,c.name AS autor "
+        "FROM opportunities o LEFT JOIN employees c ON c.id=o.created_by ORDER BY CASE o.status WHEN 'teste' THEN 0 WHEN 'ativa' THEN 1 WHEN 'ideia' THEN 2 ELSE 3 END, o.id DESC").fetchall()
+
+
 @app.get("/api/ledger", dependencies=[Depends(read_auth)])
 def ledger():
     return conn().execute("SELECT id,kind,amount_cents,description,source,created_at FROM ledger ORDER BY id DESC LIMIT 100").fetchall()

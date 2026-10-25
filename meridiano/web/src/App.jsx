@@ -3,7 +3,7 @@ import Office from './Office.jsx';
 import { api, post, sendMpToken, sendStoreSettings, getToken, setToken } from './api.js';
 
 const brl = (n) => 'R$ ' + Number(n).toFixed(2).replace('.', ',');
-const TABS = ['Escritório', 'Tarefas', 'Produtos', 'Caixa'];
+const TABS = ['Escritório', 'Tarefas', 'Produtos', 'Ideias', 'Caixa'];
 const MP_REQUEST = 'Preciso do access token do Mercado Pago';
 
 function MpTokenCard({ onSaved }) {
@@ -50,7 +50,7 @@ function MpTokenCard({ onSaved }) {
 
 export default function App() {
   const [auth, setAuth] = useState(!!getToken());
-  const [d, setD] = useState({ state: null, emps: [], msgs: [], tasks: [], prods: [], ledger: [], reqs: [], acts: [], hist: [], engine: null, loja: [] });
+  const [d, setD] = useState({ state: null, emps: [], msgs: [], tasks: [], prods: [], ledger: [], reqs: [], acts: [], hist: [], engine: null, loja: [], opps: [] });
   const [err, setErr] = useState('');
   const [loginErr, setLoginErr] = useState('');
   const [tab, setTab] = useState(0);
@@ -71,9 +71,9 @@ export default function App() {
     let on = true;
     const load = async () => {
       try {
-        const [state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja] = await Promise.all(
-          ['state', 'employees', 'messages?limit=40', 'tasks', 'products', 'ledger', 'owner-requests', 'activity?limit=30', 'history', 'engine', 'store/products'].map(api));
-        if (on) { setD({ state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja }); setErr(''); }
+        const [state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps] = await Promise.all(
+          ['state', 'employees', 'messages?limit=40', 'tasks', 'products', 'ledger', 'owner-requests', 'activity?limit=30', 'history', 'engine', 'store/products', 'opportunities'].map(api));
+        if (on) { setD({ state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps }); setErr(''); }
       } catch (e) {
         if (e.message === '401') { setToken(''); setLoginErr('Token inválido. Confira e tente de novo.'); setAuth(false); } else setErr('Sem conexão com o servidor.');
       }
@@ -152,6 +152,15 @@ export default function App() {
         {!d.prods.length && <li className="note">Nenhum produto ainda.</li>}</ul>}
 
       {tab === 3 && <>
+        <p className="note">Mesa de oportunidades: a empresa testa ideias rápido e descarta sem apego. Medições reais vêm do servidor (vendas confirmadas, visitas); o "aprendizado" é o relato do agente, não uma medição.</p>
+        <ul className="feed">{d.opps.map((o) => (
+          <li key={o.id}><b>{o.idea}</b> <small>({o.status} · esforço {o.effort} · risco {o.risk}{o.autor ? ` · ${o.autor}` : ''})</small>
+            {o.how_it_earns && <><br />Como ganha: {o.how_it_earns}</>}{o.audience && <><br />Público: {o.audience}</>}
+            {o.needs_owner && <><br /><small>Precisa do dono: {o.needs_owner}</small></>}{o.learning && <><br /><small>Aprendizado: {o.learning}</small></>}</li>))}
+          {!d.opps.length && <li className="note">A mesa ainda está vazia. Os agentes vão propor ideias pesquisando.</li>}</ul>
+      </>}
+
+      {tab === 4 && <>
         <p className="note">O caixa começa em R$ 0,00 e só muda quando o dono registra um valor realmente recebido. Falas dos agentes nunca contam.</p>
         <ul className="feed">{d.ledger.map((l) => (
           <li key={l.id}><b>{l.kind === 'receita' ? '+' : '−'} {brl(l.amount_cents / 100)}</b> · {l.description}<br />

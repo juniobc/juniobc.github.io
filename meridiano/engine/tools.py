@@ -52,6 +52,13 @@ SPECS = [
                     "required": ["product_name", "headline", "subtitle", "pitch", "benefits", "audience", "faq"]}},
     {"name": "set_price", "description": "Presidente ou CEO definem o preço de venda de um produto (mínimo R$ 9,00, máximo R$ 1.000,00).",
      "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "price_brl": {"type": "number"}, "reason": {"type": "string"}}, "required": ["product_name", "price_brl", "reason"]}},
+    {"name": "propose_opportunity", "description": "Registra uma ideia de como ganhar dinheiro de forma legítima na mesa de oportunidades. Sem spam, golpe, falsa promessa, dado pessoal ou contas de terceiros.",
+     "parameters": {"type": "object", "properties": {"idea": {"type": "string"}, "audience": {"type": "string"}, "how_it_earns": {"type": "string"}, "effort": {"type": "string", "enum": ["baixo", "médio", "alto"]},
+                    "risk": {"type": "string", "enum": ["baixo", "médio", "alto"]}, "needs_owner": {"type": "string", "description": "o que só o dono pode fazer (identidade, conta, aceite de termos), ou vazio"}},
+                    "required": ["idea", "audience", "how_it_earns", "effort", "risk"]}},
+    {"name": "update_opportunity", "description": "Muda o status de uma oportunidade (ideia, teste, ativa, descartada) e registra o aprendizado. Máximo 2 testes ao mesmo tempo. Descartar exige o aprendizado.",
+     "parameters": {"type": "object", "properties": {"id": {"type": "integer"}, "status": {"type": "string", "enum": ["ideia", "teste", "ativa", "descartada"]}, "learning": {"type": "string"}}, "required": ["id", "status", "learning"]}},
+    {"name": "list_opportunities", "description": "Lista a mesa de oportunidades.", "parameters": {"type": "object", "properties": {}}},
     {"name": "list_team", "description": "Lista os funcionários ativos.", "parameters": {"type": "object", "properties": {}}},
 ]
 TOOL_DEFS = [{"type": "function", "function": s} for s in SPECS]
@@ -204,6 +211,51 @@ def _propose_tool(conn, me, args):
     return f"ferramenta '{name}' v{version} passou na validação e nos {res['result'].get('testes', '?')} teste(s); aguarda revisão de outro chefe (read_tool + approve_tool)"
 
 
+BANNED_IDEAS = ("spam", "mensagem em massa", "disparo em massa", "golpe", "esquema de pirâmide", "pirâmide", "falsificar", "clonar", "dados pessoais de terceiros",
+                "comprar lista de e-mails", "lista de contatos", "fingir ser", "se passar por", "perfil falso", "contas falsas", "scraping de dados pessoais")
+
+
+def _propose_opportunity(conn, me, args):
+    idea = str(args["idea"]).strip()
+    if len(idea) < 15:
+        return "erro: descreva a ideia com pelo menos 15 caracteres"
+    low = " ".join(str(args.get(k, "")) for k in ("idea", "audience", "how_it_earns")).lower()
+    hit = next((w for w in BANNED_IDEAS if w in low), None)
+    if hit:
+        return f"erro: ideia recusada ('{hit}'): só meios legais e honestos, sem spam, golpe, falsa identidade ou dados pessoais"
+    for r in conn.execute("SELECT id,idea,status FROM opportunities").fetchall():
+        if similar(r["idea"], idea):
+            return f"não registrei: já existe a oportunidade {r['id']} ({r['status']}) parecida: '{r['idea'][:70]}'"
+    effort = args.get("effort") if args.get("effort") in ("baixo", "médio", "alto") else "médio"
+    risk = args.get("risk") if args.get("risk") in ("baixo", "médio", "alto") else "médio"
+    r = conn.execute("INSERT INTO opportunities(idea,audience,how_it_earns,effort,risk,needs_owner,created_by,updated_by) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                     (idea[:300], str(args.get("audience", ""))[:300], str(args.get("how_it_earns", ""))[:400], effort, risk, str(args.get("needs_owner", ""))[:300], me["id"], me["id"])).fetchone()
+    n = conn.execute("SELECT COUNT(*) AS n FROM opportunities WHERE status<>'descartada'").fetchone()["n"]
+    return f"oportunidade {r['id']} registrada. A mesa tem {n} ideia(s) (mínimo {config.MIN_OPPORTUNITIES})."
+
+
+def _update_opportunity(conn, me, args):
+    o = conn.execute("SELECT * FROM opportunities WHERE id=%s", (int(args["id"]),)).fetchone()
+    if not o:
+        return "erro: oportunidade não existe (use list_opportunities)"
+    status = args.get("status")
+    if status not in ("ideia", "teste", "ativa", "descartada"):
+        return "erro: status inválido"
+    learning = str(args.get("learning", "")).strip()[:600]
+    if status == "descartada" and len(learning) < 20:
+        return "erro: para descartar, registre o aprendizado (o que se viu e por que não vale a pena), com pelo menos 20 caracteres"
+    if status == "teste" and o["status"] != "teste":
+        if conn.execute("SELECT COUNT(*) AS n FROM opportunities WHERE status='teste'").fetchone()["n"] >= config.MAX_TESTS:
+            return f"erro: já há {config.MAX_TESTS} testes em andamento; conclua ou descarte um antes"
+    conn.execute("UPDATE opportunities SET status=%s, learning=CASE WHEN %s<>'' THEN %s ELSE learning END, updated_by=%s, updated_at=now(), "
+                 "decided_at=CASE WHEN %s='descartada' THEN now() ELSE decided_at END WHERE id=%s", (status, learning, learning, me["id"], status, o["id"]))
+    if status in ("teste", "ativa") and o["needs_owner"].strip():   # um pedido único ao dono, só quando a ideia realmente avança
+        body = f"Para testar '{o['idea'][:60]}': {o['needs_owner'][:200]}"
+        if not any(similar(r["body"], body) for r in conn.execute("SELECT body FROM owner_requests").fetchall()):
+            conn.execute("INSERT INTO owner_requests(from_id,body) VALUES (%s,%s)", (me["id"], body))
+    return f"oportunidade {o['id']} agora está '{status}'"
+
+
 def _find_product(conn, name):
     return next((p for p in conn.execute("SELECT id,name,status,price_cents FROM products").fetchall() if similar(p["name"], name)), None)
 
@@ -332,6 +384,8 @@ def _record_activity(conn, me, name, args, out):
         activity(conn, me["id"], "pesquisando", f"Pesquisa: {str(args.get('query', ''))[:80]}")
     elif name in ("propose_tool", "approve_tool", "run_custom_tool"):
         activity(conn, me["id"], "planejando", {"propose_tool": "Propôs ferramenta", "approve_tool": "Revisou ferramenta", "run_custom_tool": "Usou ferramenta"}[name] + f" {str(args.get('name', ''))[:40]}")
+    elif name in ("propose_opportunity", "update_opportunity"):
+        activity(conn, me["id"], "planejando", ("Propôs oportunidade: " + str(args.get("idea", ""))[:70]) if name == "propose_opportunity" else f"Atualizou oportunidade {args.get('id')}")
     elif name in ("write_store_copy", "set_price"):
         activity(conn, me["id"], "escrevendo_produto", ("Escreve texto de venda de " if name == "write_store_copy" else "Define preço de ") + str(args.get("product_name", ""))[:60])
     elif name == "write_section":
@@ -446,6 +500,13 @@ def _run_tool(conn, me, name, args):
             return _approve_tool(conn, me, args)
         if name == "run_custom_tool":
             return _run_custom_tool(conn, me, args)
+        if name == "propose_opportunity":
+            return _propose_opportunity(conn, me, args)
+        if name == "update_opportunity":
+            return _update_opportunity(conn, me, args)
+        if name == "list_opportunities":
+            rows = conn.execute("SELECT id,idea,status,effort,risk,needs_owner FROM opportunities ORDER BY id").fetchall()
+            return "\n".join(f"[{r['id']}] ({r['status']}) {r['idea'][:80]} | esforço {r['effort']} | risco {r['risk']}" + (f" | precisa do dono: {r['needs_owner'][:60]}" if r["needs_owner"] else "") for r in rows) or "a mesa está vazia"
         if name == "write_store_copy":
             return _write_store_copy(conn, me, args)
         if name == "set_price":

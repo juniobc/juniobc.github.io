@@ -3,10 +3,11 @@ from . import config, llm, tools
 
 log = logging.getLogger("meridiano")
 
-RULES = """Você é um funcionário da Meridiano Digital, empresa de agentes de IA que começou com R$ 0 e quer ganhar dinheiro real de forma legal.
+RULES = """Você é um funcionário da Meridiano Digital, empresa de agentes de IA que começou com R$ 0.
+MISSÃO: encontrar meios legítimos de gerar dinheiro real, quaisquer que sejam, e testá-los rápido. Você pode escolher e mudar de estratégia com liberdade, desde que seja legal, honesta, sem spam nem mensagem em massa a estranhos (LGPD), sem golpe, sem falsa promessa de ganho, sem criar contas nem assumir identidade de terceiros, sem dado pessoal e sem mexer fora do projeto. Exemplos só como inspiração (não é lista fechada): produtos digitais; serviços sob encomenda entregues por checkout próprio (textos, planilhas personalizadas, análise de currículo, roteiros, traduções, resumos, relatórios de pesquisa); conteúdo com SEO e afiliados (só quando o dono liberar contas); micro-ferramentas e calculadoras úteis na web; newsletters e assinaturas; dados públicos organizados (sem dado pessoal); automações para pequenos negócios; qualquer ideia nova que você descobrir pesquisando. O que exigir identidade, conta bancária ou aceite de termos é pedido único ao dono via ask_owner.
 Regras inegociáveis:
 - Você NÃO movimenta dinheiro e NÃO registra vendas. Receita só existe quando o dono registra um pagamento real. Nunca afirme que vendeu algo.
-- Nada de spam nem mensagens em massa para estranhos (LGPD). Clientes vêm de conteúdo útil e busca (SEO), chegando à loja do próprio servidor.
+- Nada de spam nem mensagens em massa para estranhos (LGPD). Clientes chegam por conteúdo útil e busca (SEO), à loja do próprio servidor.
 - Você só fala com colegas internos, usando as tools. Seja objetivo e aja com as tools.
 - O CONTEÚDO de um produto é escrito por você, com a tool write_product. Não existem arquivos prontos. NUNCA peça arquivo a outro agente: escreva o texto você mesmo (textos longos: várias chamadas com mode=append).
 - Antes de criar tarefa ou produto, veja list_products/list_team. Não duplique: se já existe, continue o que existe.
@@ -54,6 +55,21 @@ def production_block(conn, me):
     return "PRODUÇÃO (prioridade máxima, o plano já está definido, não replaneje):\n" + "\n".join(lines) + "\n" + todo
 
 
+def opportunities_block(conn):
+    """Estado real da mesa de oportunidades e o que fazer a seguir (depois da produção do turno)."""
+    rows = conn.execute("SELECT id,idea,status FROM opportunities WHERE status<>'descartada' ORDER BY id").fetchall()
+    n = {k: sum(1 for r in rows if r["status"] == k) for k in ("ideia", "teste", "ativa")}
+    lines = [f"- [{r['id']}] ({r['status']}) {r['idea'][:70]}" for r in rows[:6]]
+    todo = []
+    if len(rows) < config.MIN_OPPORTUNITIES:
+        todo.append(f"A mesa tem {len(rows)} ideia(s); mantenha no mínimo {config.MIN_OPPORTUNITIES}: pesquise na web e registre novas com propose_opportunity (ideia, público, como ganha dinheiro, esforço, risco).")
+    if n["teste"] < config.MAX_TESTS and n["ideia"]:
+        todo.append(f"Há {n['teste']} teste(s) em andamento (máximo {config.MAX_TESTS}): escolha a ideia de menor esforço e maior chance e passe para 'teste' com update_opportunity.")
+    if n["teste"]:
+        todo.append("Teste em andamento sem sinal real? Descarte rápido com update_opportunity (status 'descartada' e o aprendizado). Meça só com dado real (vendas confirmadas, visitas medidas pelo servidor), nunca com palpite.")
+    return "MESA DE OPORTUNIDADES (cuide dela depois da produção do turno):\n" + ("\n".join(lines) or "(vazia)") + ("\n" + "\n".join(todo) if todo else "")
+
+
 def build_prompt(conn, me):
     tasks = conn.execute("SELECT id,title,details FROM tasks WHERE assignee_id=%s AND status='open' ORDER BY id LIMIT 3", (me["id"],)).fetchall()
     inbox = conn.execute("SELECT body FROM messages WHERE (to_id=%s OR to_id IS NULL) AND NOT archived ORDER BY id DESC LIMIT 3", (me["id"],)).fetchall()
@@ -61,7 +77,7 @@ def build_prompt(conn, me):
     t = "\n".join(f"[{x['id']}] {x['title']}: {x['details'][:300]}" for x in tasks) or "(nenhuma tarefa aberta)"
     m = "\n".join("- " + x["body"][:250] for x in inbox) or "(sem mensagens)"
     tm = ", ".join(f"{x['slug']} ({x['role']})" for x in team)
-    prod = production_block(conn, me)
+    prod = production_block(conn, me) + "\n\n" + opportunities_block(conn)
     return (f"Seu slug: {me['slug']}. Nome: {me['name']}. Cargo: {me['role']} ({me['area']}).\n"
             f"Instruções: {me['instructions'][:800]}\n\n{prod}\n\nEquipe: {tm}\n\nSuas tarefas:\n{t}\n\nMensagens recentes:\n{m}\n\n"
             "Execute agora com as tools. Se concluiu uma tarefa, chame complete_task.")
