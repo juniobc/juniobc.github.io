@@ -33,7 +33,7 @@ def _page(title, msg, status):
 
 def register(app, read_auth, admin_auth, conn_fn):
     # ------------------------------------------------------------ login
-    @app.get("/api/auth/google/start")
+    @app.api_route("/api/auth/google/start", methods=["GET", "HEAD"])   # curl -I (HEAD) também recebe o 302
     def google_start():
         url, state = google_auth.begin(conn_fn())
         if url is None:
