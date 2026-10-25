@@ -573,3 +573,15 @@ def test_engine_reports_isolation(conn, monkeypatch):
     main._conn = conn
     r = TestClient(main.app).get("/api/engine", headers={"X-Token": "t"}).json()
     assert "subprocesso isolado" in r["isolamento_ferramentas"] and ("rede BLOQUEADA" in r["isolamento_ferramentas"] or "NÃO bloqueada" in r["isolamento_ferramentas"])
+
+
+def test_plan_renames_old_product_without_duplicating(conn):
+    from meridiano.engine import plan
+    pid = conn.execute("INSERT INTO products(name,file_path,content) VALUES ('Plano Mestre Financeiro Pessoal 2025','p.md','texto antigo') RETURNING id").fetchone()["id"]
+    conn.execute("INSERT INTO product_sections(product_id,position,title,content) VALUES (%s,7,'Metas e planejamento anual de 2025','texto da seção 7')", (pid,))
+    plan.ensure(conn); plan.ensure(conn)
+    rows = conn.execute("SELECT id,name,content FROM products WHERE name ILIKE 'Plano Mestre%'").fetchall()
+    assert len(rows) == 1 and rows[0]["id"] == pid and rows[0]["name"] == "Plano Mestre Financeiro Pessoal" and rows[0]["content"] == "texto antigo"
+    sec = conn.execute("SELECT title,content FROM product_sections WHERE product_id=%s AND position=7", (pid,)).fetchone()
+    assert sec["title"] == "Metas e planejamento anual" and sec["content"] == "texto da seção 7"   # título novo, texto preservado
+    assert not conn.execute("SELECT 1 FROM products WHERE name ILIKE '%2025%'").fetchone()
