@@ -70,6 +70,31 @@ def opportunities_block(conn):
     return "MESA DE OPORTUNIDADES (cuide dela depois da produção do turno):\n" + ("\n".join(lines) or "(vazia)") + ("\n" + "\n".join(todo) if todo else "")
 
 
+def team_block(conn, me):
+    """Só Presidente e CEO: contratação obrigatória até a meta e revisão de equipe a cada 30 turnos, com números reais."""
+    if not tools.FOUNDER_RE.search(me["role"]):
+        return ""
+    from . import team
+    st = team.status(conn)
+    if not (st["below_target"] or st["review_due"] or st["overloaded"]):
+        return ""
+    lines = [f"EQUIPE: {st['headcount']} pessoa(s) ativa(s) (meta mínima {st['target']}), {st['open_tasks']} tarefa(s) aberta(s) ({st['tasks_per_person']} por pessoa)."]
+    if st["below_target"] or st["overloaded"]:
+        faltam = team.missing_roles(st["people"])[:4]
+        sug = "; ".join(f"{n} (entrega: {e})" for n, e in faltam) or "um especialista para a frente que está sem dono"
+        motivo = "a equipe está abaixo da meta" if st["below_target"] else "há mais tarefas que capacidade"
+        lines.append(f"VOCÊ DEVE CONTRATAR AGORA (um por turno), porque {motivo}: use hire_employee com instruções completas (função, como trabalha, o que entrega, como se mede), motivo claro e entrega mensurável por dia. "
+                     f"Funções que ainda ninguém cobre (sugestões, não lista fechada): {sug}. Respeite o orçamento de tokens: cada pessoa nova divide o dia com todos.")
+    if st["review_due"]:
+        rows = []
+        for p in st["people"]:
+            t, a, s2 = team.delivered(conn, p["id"])
+            rows.append(f"- {p['name']} ({p['role']}): {t} tarefa(s) concluída(s), {a} ação(ões), {s2} seção(ões) escrita(s)" + (f"; meta: {p['deliverable']}" if p["deliverable"] else ""))
+        lines.append(f"REVISÃO DE EQUIPE DEVIDA (a cada {config.TEAM_REVIEW_EVERY} turnos). Entregas registradas:\n" + "\n".join(rows)
+                     + "\nQuem não entrega: demita com fire_employee e motivo. Depois registre com team_review (resumo: quem entrega, quem não, o que muda).")
+    return "\n".join(lines)
+
+
 def build_prompt(conn, me):
     tasks = conn.execute("SELECT id,title,details FROM tasks WHERE assignee_id=%s AND status='open' ORDER BY id LIMIT 3", (me["id"],)).fetchall()
     inbox = conn.execute("SELECT body FROM messages WHERE (to_id=%s OR to_id IS NULL) AND NOT archived ORDER BY id DESC LIMIT 3", (me["id"],)).fetchall()
@@ -78,6 +103,9 @@ def build_prompt(conn, me):
     m = "\n".join("- " + x["body"][:250] for x in inbox) or "(sem mensagens)"
     tm = ", ".join(f"{x['slug']} ({x['role']})" for x in team)
     prod = production_block(conn, me) + "\n\n" + opportunities_block(conn)
+    eq = team_block(conn, me)
+    if eq:
+        prod += "\n\n" + eq
     return (f"Seu slug: {me['slug']}. Nome: {me['name']}. Cargo: {me['role']} ({me['area']}).\n"
             f"Instruções: {me['instructions'][:800]}\n\n{prod}\n\nEquipe: {tm}\n\nSuas tarefas:\n{t}\n\nMensagens recentes:\n{m}\n\n"
             "Execute agora com as tools. Se concluiu uma tarefa, chame complete_task.")

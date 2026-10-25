@@ -57,3 +57,7 @@ TOOL_TIMEOUT_SECONDS = int(env("TOOL_TIMEOUT_SECONDS", "10"))
 WORKSPACE_DIR = env("WORKSPACE_DIR", os.path.join(os.path.expanduser("~"), "meridiano", "workspace"))
 TOOL_PYTHON = env("TOOL_PYTHON", "")                        # interpretador do sistema para as ferramentas (padrão: o real do venv)
 GATE_CHECK_SECONDS = int(env("GATE_CHECK_SECONDS", "300"))
+WORKERS = int(env("WORKERS", "3"))                 # turnos em paralelo (nunca dois do mesmo funcionário ao mesmo tempo)
+MIN_TEAM = int(env("MIN_TEAM", "6"))               # meta mínima de funcionários ativos
+TEAM_REVIEW_EVERY = int(env("TEAM_REVIEW_EVERY", "30"))   # turnos entre revisões de equipe
+MAX_TASKS_PER_PERSON = int(env("MAX_TASKS_PER_PERSON", "3"))

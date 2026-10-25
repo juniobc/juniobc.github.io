@@ -55,17 +55,25 @@ def state():
 @app.get("/api/engine", dependencies=[Depends(read_auth)])
 def engine_status():
     """O motor está vivo? Quem trabalha, quando foi o último turno, quando é o próximo e por que espera."""
-    r = conn().execute(
-        "SELECT es.wait_reason, es.sleep_s, "
+    from ..engine import team
+    c = conn()
+    r = c.execute(
+        "SELECT es.wait_reason, es.sleep_s, es.workers_total, es.workers_running, es.running_names, es.turn_count, "
         "extract(epoch FROM now() - es.heartbeat_at) AS since_beat, extract(epoch FROM es.next_turn_at - now()) AS next_in, "
-        "es.last_turn_at, es.isolation, es.tools_enabled, es.tools_reason, es.tools_help, es.tools_backend, l.name AS ultimo_por, c.name AS da_vez "
-        "FROM engine_status es LEFT JOIN employees l ON l.id=es.last_turn_employee_id LEFT JOIN employees c ON c.id=es.current_employee_id WHERE es.id=1").fetchone()
+        "es.last_turn_at, es.isolation, es.tools_enabled, es.tools_reason, es.tools_help, es.tools_backend, l.name AS ultimo_por "
+        "FROM engine_status es LEFT JOIN employees l ON l.id=es.last_turn_employee_id WHERE es.id=1").fetchone()
+    st = team.status(c)
+    equipe = {"funcionarios": st["headcount"], "meta": st["target"], "tarefas_abertas": st["open_tasks"], "proxima_revisao_em_turnos": st["next_review_in"]}
     if not r or r["since_beat"] is None:
-        return {"vivo": False, "motivo_espera": "motor nunca iniciou", "proximo_turno_em_s": None, "ultimo_turno_em": None, "ultimo_turno_por": None, "funcionario_da_vez": None}
+        return {"vivo": False, "motivo_espera": "motor nunca iniciou", "proximo_turno_em_s": None, "ultimo_turno_em": None, "ultimo_turno_por": None,
+                "funcionario_da_vez": None, "trabalhadores": 0, "turnos_rodando": 0, "funcionarios_da_vez": [], "equipe": equipe}
+    nomes = [n for n in (r["running_names"] or "").split(", ") if n]
     return {"vivo": float(r["since_beat"]) < r["sleep_s"] + 180, "motivo_espera": r["wait_reason"],
             "proximo_turno_em_s": max(0, round(float(r["next_in"]))), "ultimo_turno_em": r["last_turn_at"].isoformat() if r["last_turn_at"] else None,
-            "ultimo_turno_por": r["ultimo_por"], "funcionario_da_vez": r["da_vez"],
-            "limites": {"chamadas": config.DAILY_CALL_LIMIT, "tokens": config.DAILY_TOKEN_LIMIT}, "isolamento_ferramentas": {"ligadas": r["tools_enabled"], "motivo": r["tools_reason"], "o_que_falta": r["tools_help"], "backend": r["tools_backend"], "detalhe": r["isolation"]}}
+            "ultimo_turno_por": r["ultimo_por"], "funcionario_da_vez": nomes[0] if nomes else None, "funcionarios_da_vez": nomes,
+            "trabalhadores": r["workers_total"], "turnos_rodando": r["workers_running"], "turnos_totais": r["turn_count"], "equipe": equipe,
+            "limites": {"chamadas": config.DAILY_CALL_LIMIT, "tokens": config.DAILY_TOKEN_LIMIT},
+            "isolamento_ferramentas": {"ligadas": r["tools_enabled"], "motivo": r["tools_reason"], "o_que_falta": r["tools_help"], "backend": r["tools_backend"], "detalhe": r["isolation"]}}
 
 
 @app.get("/api/employees", dependencies=[Depends(read_auth)])

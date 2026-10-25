@@ -7,6 +7,10 @@ from fastapi.testclient import TestClient
 PGBIN = "/usr/lib/postgresql/16/bin"
 
 
+HIRE = {"instructions": "Você escreve textos de apoio para os produtos da empresa, revisa o que os outros escrevem e entrega duas seções completas por dia, em português claro e sem promessas de ganho.",
+        "reason": "falta quem escreva e revise textos enquanto os fundadores cuidam da estratégia", "deliverable": "2 seções completas e revisadas por dia"}
+
+
 @pytest.fixture(scope="module")
 def url(tmp_path_factory):
     d = tmp_path_factory.mktemp("pg")
@@ -47,14 +51,14 @@ def test_hire_rules_and_model_whitelist(conn):
     from meridiano.engine import config, seed, tools
     seed.seed(conn)
     ceo = conn.execute("SELECT * FROM employees WHERE slug='ceo'").fetchone()
-    out = tools.run_tool(conn, ceo, "hire_employee", {"name": "Luiza", "role": "Gerente de Conteúdo", "area": "Conteúdo", "instructions": "x", "reason": "falta conteúdo"})
+    out = tools.run_tool(conn, ceo, "hire_employee", {"name": "Luiza", "role": "Gerente de Conteúdo", "area": "Conteúdo", **HIRE})
     assert out.startswith("contratado")
     luiza = conn.execute("SELECT * FROM employees WHERE slug='luiza'").fetchone()
     assert luiza["model"] in config.ALLOWED_MODELS and luiza["hire_reason"] and luiza["hired_by"] == ceo["id"]
-    out = tools.run_tool(conn, luiza, "hire_employee", {"name": "Z", "role": "Estagiário", "area": "A", "instructions": "x", "reason": "r"})
+    out = tools.run_tool(conn, luiza, "hire_employee", {"name": "Z", "role": "Estagiário", "area": "A", **HIRE})
     assert out.startswith("contratado")  # gerente pode
     z = conn.execute("SELECT * FROM employees WHERE slug='z'").fetchone()
-    assert tools.run_tool(conn, z, "hire_employee", {"name": "Y", "role": "R", "area": "A", "instructions": "x", "reason": "r"}).startswith("erro")
+    assert tools.run_tool(conn, z, "hire_employee", {"name": "Y", "role": "R", "area": "A", **HIRE}).startswith("erro")
 
 
 def test_llm_rejects_unlisted_model(conn):
@@ -136,7 +140,7 @@ def test_migrations_idempotent_and_clean_old_empty_usage(url, monkeypatch):
     c.execute("INSERT INTO employees(slug,name,role,area,instructions,model) VALUES ('a','A','CEO','D','x','m'),('b','B','CEO','D','x','m')")
     c.execute("INSERT INTO usage_log(employee_id,model,prompt_tokens,completion_tokens) SELECT id,'m',100,3500 FROM employees, generate_series(1,2)")
     c.execute("INSERT INTO messages(from_id,body) SELECT id,'oi' FROM employees WHERE slug='b'")
-    assert migrate.migrate(c) == ["002_zera_uso_vazio.sql", "003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql", "010_loja.sql", "011_oportunidades.sql"]
+    assert migrate.migrate(c) == ["002_zera_uso_vazio.sql", "003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql", "010_loja.sql", "011_oportunidades.sql", "012_equipe_paralelo.sql"]
     assert migrate.migrate(c) == []
     ok = c.execute("SELECT e.slug FROM usage_log u JOIN employees e ON e.id=u.employee_id WHERE u.ok GROUP BY 1").fetchall()
     assert [r["slug"] for r in ok] == ["b"]  # b tem mensagem gravada: chamadas dele eram úteis
@@ -210,7 +214,7 @@ def test_migration_003_cleans_duplicates(url, monkeypatch):
         c.execute("INSERT INTO products(name,file_path) VALUES ('Toolkit X','a.txt')")
         c.execute("INSERT INTO tasks(title) VALUES ('Pesquisar copy')")
     c.execute("INSERT INTO tasks(title,details) VALUES ('Receber fontes','mandar os arquivos .txt fonte')")
-    assert migrate.migrate(c) == ["003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql", "010_loja.sql", "011_oportunidades.sql"]
+    assert migrate.migrate(c) == ["003_produtos_pedidos_pacing.sql", "004_demissao_atividade.sql", "005_engine_status.sql", "006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql", "010_loja.sql", "011_oportunidades.sql", "012_equipe_paralelo.sql"]
     assert c.execute("SELECT COUNT(*) AS n FROM products").fetchone()["n"] == 1
     assert c.execute("SELECT COUNT(*) AS n FROM tasks WHERE status='open'").fetchone()["n"] == 1
 
@@ -220,7 +224,7 @@ def test_fire_rules_and_activity(conn, tmp_path, monkeypatch):
     monkeypatch.setattr(config, "PRODUCTS_DIR", str(tmp_path))
     ceo = _ceo(conn)
     pres = conn.execute("SELECT * FROM employees WHERE slug='presidente'").fetchone()
-    hire = lambda n, r: tools.run_tool(conn, ceo, "hire_employee", {"name": n, "role": r, "area": "A", "instructions": "x", "reason": "falta função"})
+    hire = lambda n, r: tools.run_tool(conn, ceo, "hire_employee", {"name": n, "role": r, "area": "A", **HIRE})
     hire("Luiza", "Gerente de Conteúdo"); hire("Davi", "Redator")
     luiza = conn.execute("SELECT * FROM employees WHERE slug='luiza'").fetchone()
     davi = conn.execute("SELECT * FROM employees WHERE slug='davi'").fetchone()
@@ -254,7 +258,7 @@ def test_api_activity_history_card(conn, monkeypatch):
     from meridiano.engine import tools
     from meridiano.api import main
     ceo = _ceo(conn)
-    tools.run_tool(conn, ceo, "hire_employee", {"name": "Luiza", "role": "Gerente", "area": "A", "instructions": "x", "reason": "r"})
+    tools.run_tool(conn, ceo, "hire_employee", {"name": "Luiza", "role": "Gerente", "area": "A", **HIRE})
     tools.run_tool(conn, ceo, "post_message", {"to": "luiza", "body": "Bem-vinda"})
     main._conn = conn
     c = TestClient(main.app); h = {"X-Token": "t"}
@@ -331,12 +335,14 @@ def test_api_engine_status(conn, monkeypatch):
     main._conn = conn
     c = TestClient(main.app); h = {"X-Token": "t"}
     assert c.get("/api/engine", headers=h).json()["vivo"] is False          # nunca iniciou
-    pacing.beat(conn, current=ceo["id"], delay=60)
+    pacing.beat_workers(conn, 3, ["Rafael", "Helena"], 60, "nenhum")
     r = c.get("/api/engine", headers=h).json()
     assert r["vivo"] and r["funcionario_da_vez"] == "Rafael" and 0 <= r["proximo_turno_em_s"] <= 60 and r["motivo_espera"] == "nenhum"
-    pacing.beat(conn, last_turn=ceo["id"], delay=600, reason="limite")
+    assert r["trabalhadores"] == 3 and r["turnos_rodando"] == 2 and r["funcionarios_da_vez"] == ["Rafael", "Helena"]
+    pacing.beat_turn(conn, ceo["id"])
+    pacing.beat_workers(conn, 3, [], 600, "limite")
     r = c.get("/api/engine", headers=h).json()
-    assert r["motivo_espera"] == "limite" and r["ultimo_turno_por"] == "Rafael" and r["funcionario_da_vez"] is None
+    assert r["motivo_espera"] == "limite" and r["ultimo_turno_por"] == "Rafael" and r["funcionario_da_vez"] is None and r["turnos_rodando"] == 0
     conn.execute("UPDATE engine_status SET heartbeat_at = now() - interval '2 hours'")
     assert c.get("/api/engine", headers=h).json()["vivo"] is False           # sem batimento: processo morto
 
@@ -397,7 +403,7 @@ def test_migration_006_archives_existing_messages(url, monkeypatch):
     for f in files[:5]:
         c.execute(f.read_text()); c.execute("INSERT INTO schema_migrations(name) VALUES (%s)", (f.name,))
     c.execute("INSERT INTO messages(body) VALUES ('velha 1'),('velha 2')")
-    assert migrate.migrate(c) == ["006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql", "010_loja.sql", "011_oportunidades.sql"]
+    assert migrate.migrate(c) == ["006_secoes_arquivo.sql", "007_ferramentas.sql", "008_portao_isolamento.sql", "009_vendas_no_servidor.sql", "010_loja.sql", "011_oportunidades.sql", "012_equipe_paralelo.sql"]
     c.execute("INSERT INTO messages(body) VALUES ('nova')")
     assert [r["body"] for r in c.execute("SELECT body FROM messages WHERE NOT archived").fetchall()] == ["nova"]
 
@@ -511,7 +517,7 @@ def test_timeout_and_memory_and_output_limits(gate_on, monkeypatch):
 def _mk(conn, name, role):
     from meridiano.engine import tools
     ceo = _ceo(conn)
-    tools.run_tool(conn, ceo, "hire_employee", {"name": name, "role": role, "area": "A", "instructions": "x", "reason": "r"})
+    tools.run_tool(conn, ceo, "hire_employee", {"name": name, "role": role, "area": "A", **HIRE})
     return conn.execute("SELECT * FROM employees WHERE name=%s", (name,)).fetchone()
 
 
@@ -741,7 +747,7 @@ def test_migration_009_supersedes_old_owner_requests(url, monkeypatch):
         c.execute(f.read_text()); c.execute("INSERT INTO schema_migrations(name) VALUES (%s)", (f.name,))
     c.execute("INSERT INTO owner_requests(body) VALUES ('Produto Toolkit pronto, preciso que o Junio publique no marketplace'),('Abrir conta na Hotmart com CPF')")
     c.execute("INSERT INTO owner_requests(body,done) VALUES ('antigo já feito',true)")
-    assert migrate.migrate(c) == ["009_vendas_no_servidor.sql", "010_loja.sql", "011_oportunidades.sql"]
+    assert migrate.migrate(c) == ["009_vendas_no_servidor.sql", "010_loja.sql", "011_oportunidades.sql", "012_equipe_paralelo.sql"]
     rows = c.execute("SELECT done,resolution FROM owner_requests ORDER BY id").fetchall()
     assert all(r["done"] for r in rows)
     assert [r["resolution"] for r in rows[:2]] == ["substituído: as vendas passam a ser feitas no próprio servidor, com Mercado Pago"] * 2
@@ -1159,3 +1165,214 @@ def test_status_route_reflects_file_and_verifies_in_background(conn, secdir, mon
     ss._thread.join(5)                                                                                    # reverificação em segundo plano
     r = c.get("/api/secrets/mp-token", headers={"X-Token": "leitura"}).json()
     assert r["verificado"] is True and r["modo"] == "producao" and r["permissoes_ok"] is True and r["problema"] is None
+
+
+# ---------- equipe: contratação, revisão a cada 30 turnos, turnos em paralelo ----------
+
+def _set_turns(conn, n):
+    conn.execute("UPDATE engine_status SET turn_count=%s WHERE id=1", (n,))
+
+
+def _grow_team(conn, ceo, total):
+    from meridiano.engine import tools
+    nomes = ["Ana", "Bruno", "Carla", "Diego", "Elisa", "Fabio", "Gisele", "Hugo"]
+    papeis = ["Diretora de Produto", "Redator SEO", "Atendimento", "Analista de Oportunidades", "Designer de página", "Financeiro", "Suporte", "Analista"]
+    i = 0
+    while conn.execute("SELECT COUNT(*) AS n FROM employees WHERE active").fetchone()["n"] < total:
+        out = tools.run_tool(conn, ceo, "hire_employee", {"name": nomes[i], "role": papeis[i], "area": "A", **HIRE})
+        assert out.startswith("contratado"), out
+        i += 1
+
+
+def test_hiring_requires_complete_instructions_reason_and_measurable_deliverable(conn):
+    from meridiano.engine import tools
+    ceo = _ceo(conn)
+    base = {"name": "Ana", "role": "Redatora SEO", "area": "Marketing", **HIRE}
+    assert tools.run_tool(conn, ceo, "hire_employee", dict(base, instructions="escreve coisas")).startswith("erro: instruções incompletas")
+    assert tools.run_tool(conn, ceo, "hire_employee", dict(base, reason="falta")).startswith("erro: informe o motivo")
+    assert tools.run_tool(conn, ceo, "hire_employee", dict(base, deliverable="")).startswith("erro: toda contratação precisa de uma entrega mensurável")
+    assert tools.run_tool(conn, ceo, "hire_employee", base).startswith("contratado")
+    ana = conn.execute("SELECT * FROM employees WHERE slug='ana'").fetchone()
+    assert ana["deliverable"] == HIRE["deliverable"] and ana["hire_reason"] and ana["hired_by"] == ceo["id"]
+
+
+def test_founders_must_hire_until_the_minimum_team_and_others_are_not_nagged(conn):
+    from meridiano.engine import agent, team
+    ceo = _ceo(conn)
+    pres = conn.execute("SELECT * FROM employees WHERE slug='presidente'").fetchone()
+    st = team.status(conn)
+    assert st["headcount"] == 2 and st["below_target"] and st["target"] == 6
+    for f in (ceo, pres):
+        p = agent.build_prompt(conn, f)
+        assert "EQUIPE: 2 pessoa(s)" in p and "meta mínima 6" in p and "VOCÊ DEVE CONTRATAR AGORA" in p and "hire_employee" in p
+        assert "Diretor/a de Produto" in p and "Redator/a SEO" in p                      # só sugestões de funções que ninguém cobre
+    _grow_team(conn, ceo, 3)
+    dev = conn.execute("SELECT * FROM employees WHERE slug='ana'").fetchone()
+    assert "VOCÊ DEVE CONTRATAR" not in agent.build_prompt(conn, dev) and "EQUIPE:" not in agent.build_prompt(conn, dev)   # só Presidente/CEO
+    names = [n for n, _ in team.missing_roles(team.status(conn)["people"])]
+    assert "Diretor/a de Produto" not in names                                            # já há uma Diretora de Produto
+    _grow_team(conn, ceo, 6)
+    assert "VOCÊ DEVE CONTRATAR" not in agent.build_prompt(conn, ceo)                      # meta atingida e revisão ainda não devida
+
+
+def test_team_review_rules(conn):
+    from meridiano.engine import tools, team, agent
+    ceo = _ceo(conn)
+    SUMMARY = "Rafael e Helena entregam as seções; Ana escreve artigos SEO; ninguém para demitir agora."
+    assert tools.run_tool(conn, ceo, "team_review", {"summary": SUMMARY}).startswith("erro: a equipe tem 2 pessoa(s)")      # abaixo da meta
+    _grow_team(conn, ceo, 6)
+    assert "próxima revisão só vale em 30 turno(s)" in tools.run_tool(conn, ceo, "team_review", {"summary": SUMMARY})        # ainda não é hora
+    _set_turns(conn, 30)
+    assert team.status(conn)["review_due"] and "REVISÃO DE EQUIPE DEVIDA" in agent.build_prompt(conn, ceo)
+    dev = conn.execute("SELECT * FROM employees WHERE slug='ana'").fetchone()
+    assert tools.run_tool(conn, dev, "team_review", {"summary": SUMMARY}).startswith("erro: só Presidente ou CEO")
+    assert tools.run_tool(conn, ceo, "team_review", {"summary": "ok"}).startswith("erro: a revisão precisa de um resumo")
+    # tarefas demais para a equipe: precisa contratar (ou aliviar) antes de registrar
+    for i in range(19):
+        conn.execute("INSERT INTO tasks(title,assignee_id,created_by) VALUES (%s,%s,%s)", (f"Tarefa {i}", ceo["id"], ceo["id"]))
+    assert team.status(conn)["overloaded"] and "mais tarefas que capacidade" in agent.build_prompt(conn, ceo)
+    assert "mais de 3 por pessoa" in tools.run_tool(conn, ceo, "team_review", {"summary": SUMMARY})
+    _grow_team(conn, ceo, 7)
+    conn.execute("UPDATE tasks SET status='done' WHERE id > 8")
+    assert tools.run_tool(conn, ceo, "team_review", {"summary": SUMMARY}) == "revisão de equipe registrada"
+    assert conn.execute("SELECT COUNT(*) AS n FROM messages WHERE body LIKE 'Revisão de equipe (7 pessoas%'").fetchone()["n"] == 1
+    assert not team.status(conn)["review_due"] and team.status(conn)["next_review_in"] == 30
+    _set_turns(conn, 59)
+    assert not team.status(conn)["review_due"]
+    _set_turns(conn, 60)
+    assert team.status(conn)["review_due"]
+
+
+def test_review_prompt_lists_real_deliveries(conn):
+    from meridiano.engine import agent, tools, plan
+    ceo = _ceo(conn)
+    _grow_team(conn, ceo, 6)
+    plan.ensure(conn)
+    tools.run_tool(conn, ceo, "write_section", {"product_name": "Copy de Vendas", "section_number": 1, "content": WORDS(420)})
+    conn.execute("INSERT INTO tasks(title,assignee_id,created_by,status) VALUES ('feita',%s,%s,'done')", (ceo["id"], ceo["id"]))
+    _set_turns(conn, 31)
+    p = agent.build_prompt(conn, ceo)
+    assert "- Rafael (CEO): 1 tarefa(s) concluída(s)" in p and "1 seção(ões) escrita(s)" in p
+    assert "meta: 2 seções completas e revisadas por dia" in p and "fire_employee" in p
+
+
+class _Run:
+    """run_turn de mentira: registra a concorrência e espera os colegas (barreira) para provar que rodaram juntos."""
+    def __init__(self, parties=None):
+        import threading
+        self.lock = threading.Lock(); self.active = set(); self.max = 0; self.calls = []; self.dup = False
+        self.barrier = threading.Barrier(parties, timeout=10) if parties else None
+
+    def __call__(self, conn, me):
+        with self.lock:
+            if me["id"] in self.active:
+                self.dup = True
+            self.active.add(me["id"]); self.calls.append(me["slug"]); self.max = max(self.max, len(self.active))
+        try:
+            if self.barrier:
+                self.barrier.wait()
+        finally:
+            with self.lock:
+                self.active.discard(me["id"])
+
+
+def _threads(n, fn):
+    import threading
+    out = [threading.Thread(target=fn, args=(i,)) for i in range(n)]
+    [t.start() for t in out]; [t.join(30) for t in out]
+
+
+def test_engine_runs_turns_in_parallel_without_overlapping_the_same_employee(conn, url, monkeypatch):
+    from meridiano.engine import main as eng_main, db
+    ceo = _ceo(conn); _grow_team(conn, ceo, 4)
+    conns = [db.connect() for _ in range(3)]
+    e = eng_main.Engine(workers=3)
+    run = _Run(parties=3)
+    results = []
+    _threads(3, lambda i: results.append(e.step(conns[i], run=run)))
+    assert run.max == 3 and not run.dup                                    # 3 turnos ao mesmo tempo (a barreira só abre com os 3)
+    assert len(set(run.calls)) == 3 and all(r[0] for r in results)       # 3 funcionários diferentes
+    assert conn.execute("SELECT turn_count FROM engine_status").fetchone()["turn_count"] == 3
+    assert e.snapshot() == []                                              # todos liberados
+
+
+def test_engine_round_robin_covers_everyone_and_never_double_books(conn):
+    from meridiano.engine import main as eng_main, db
+    ceo = _ceo(conn); _grow_team(conn, ceo, 4)                             # 4 funcionários
+    conns = [db.connect() for _ in range(3)]
+    e = eng_main.Engine(workers=3)
+    run = _Run()
+    def work(i):
+        for _ in range(4):
+            e.step(conns[i], run=run)
+    _threads(3, work)
+    assert not run.dup and run.max <= 3 and len(run.calls) == 12
+    assert set(run.calls) == {"presidente", "ceo", "ana", "bruno"}
+    counts = {s: run.calls.count(s) for s in set(run.calls)}
+    assert max(counts.values()) - min(counts.values()) <= 1                # rodízio justo: 3 turnos cada
+
+
+def test_engine_claim_returns_none_when_everyone_is_busy(conn):
+    from meridiano.engine import main as eng_main
+    _ceo(conn)
+    e = eng_main.Engine(workers=3)
+    a, b = e.claim(conn), e.claim(conn)
+    assert {a["slug"], b["slug"]} == {"presidente", "ceo"} and e.claim(conn) is None
+    e.release(a["id"])
+    assert e.claim(conn)["id"] == a["id"]
+
+
+def test_rate_limit_pauses_everyone_with_exponential_backoff_and_is_not_a_failure(conn):
+    from meridiano.engine import main as eng_main, llm
+    _ceo(conn)
+    e = eng_main.Engine(workers=3)
+    def limited(c, me):
+        raise llm.RateLimited("m", None)
+    ran, delay, reason = e.step(conn, run=limited)
+    assert not ran and reason == "429" and delay == 60 and e.backoff == 60 and e.pause_until > 0
+    calls = []
+    ran, delay, reason = e.step(conn, run=lambda c, me: calls.append(me))          # outro trabalhador: em pausa, nem tenta
+    assert not ran and reason == "429" and calls == [] and 0 < delay <= 60
+    e.pause_until = 0
+    e.step(conn, run=limited)
+    assert e.backoff == 120                                                       # dobra
+    e.pause_until = 0
+    ran, _, reason = e.step(conn, run=lambda c, me: None)
+    assert ran and reason == "nenhum" and e.backoff == 0                          # sucesso zera o recuo
+    from meridiano.engine import llm as L
+    assert L.failures_today(conn)[0] == 0                                         # 429 não conta como falha
+    assert conn.execute("SELECT turn_count FROM engine_status").fetchone()["turn_count"] == 1    # só o turno que deu certo conta
+
+
+def test_engine_error_in_one_turn_does_not_stop_the_others(conn):
+    from meridiano.engine import main as eng_main
+    _ceo(conn)
+    e = eng_main.Engine(workers=2)
+    def boom(c, me):
+        raise RuntimeError("falha de teste")
+    ran, delay, reason = e.step(conn, run=boom)
+    assert not ran and reason == "erro" and e.snapshot() == []                    # liberou o funcionário
+    assert e.step(conn, run=lambda c, me: None)[0] is True
+
+
+def test_hard_limit_slows_every_worker_instead_of_stopping(conn):
+    from meridiano.engine import main as eng_main, config
+    _ceo(conn)
+    conn.execute("INSERT INTO usage_log(model,prompt_tokens,completion_tokens) VALUES ('m',%s,0)", (config.DAILY_TOKEN_LIMIT,))
+    e = eng_main.Engine(workers=3)
+    ran, delay, reason = e.step(conn, run=lambda c, me: None)
+    assert ran and reason == "limite" and delay == config.SLOW_TICK_SECONDS
+
+
+def test_housekeeping_publishes_parallel_status_to_the_panel(conn, monkeypatch):
+    from meridiano.engine import main as eng_main
+    from meridiano.api import main
+    monkeypatch.setenv("MERIDIANO_API_TOKEN", "t")
+    ceo = _ceo(conn)
+    e = eng_main.Engine(workers=3)
+    me = e.claim(conn)
+    e.housekeeping(conn, once=True)
+    main._conn = conn
+    r = TestClient(main.app).get("/api/engine", headers={"X-Token": "t"}).json()
+    assert r["vivo"] and r["trabalhadores"] == 3 and r["turnos_rodando"] == 1 and r["funcionarios_da_vez"] == [me["name"]]
+    assert r["equipe"] == {"funcionarios": 2, "meta": 6, "tarefas_abertas": 0, "proxima_revisao_em_turnos": 30}
