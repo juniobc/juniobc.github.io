@@ -38,10 +38,6 @@ def failures_today(conn):
 def chat(conn, employee_id, model, messages, tools=None):
     if model not in config.ALLOWED_MODELS:
         raise ValueError(f"modelo fora da lista permitida: {model}")
-    calls, tokens = usage_today(conn)
-    fails, _ = failures_today(conn)
-    if calls >= config.DAILY_CALL_LIMIT or tokens >= config.DAILY_TOKEN_LIMIT or fails >= config.DAILY_FAIL_LIMIT:
-        raise BudgetExceeded(f"limite diário atingido ({calls} chamadas, {tokens} tokens, {fails} falhas)")
     key = config.env("NOUS_API_KEY")
     if not key:
         raise RuntimeError("NOUS_API_KEY não definida")
@@ -86,13 +82,6 @@ def budget_fraction(conn):
     return max(tokens / config.DAILY_TOKEN_LIMIT, calls / config.DAILY_CALL_LIMIT)
 
 
-def ahead_of_budget(conn):
-    """True se os tokens de hoje já passaram do ritmo do dia (+15%): o motor espera em vez de gastar tudo cedo."""
-    _, tokens = usage_today(conn)
-    frac = conn.execute("SELECT extract(epoch FROM now() - date_trunc('day', now())) / 86400 AS f").fetchone()["f"]
-    return tokens / config.DAILY_TOKEN_LIMIT > float(frac) + 0.15
-
-
 def chat_fallback(conn, employee_id, model, messages, tools=None, sleep=time.sleep):
     """Tenta o modelo do funcionário e, se vier vazio/erro, até 2 outros do rodízio.
     Em 429 espera com recuo exponencial (2, 4, 8 s, ou o Retry-After) antes de desistir daquele modelo."""
@@ -102,8 +91,6 @@ def chat_fallback(conn, employee_id, model, messages, tools=None, sleep=time.sle
         for attempt in range(3):
             try:
                 return chat(conn, employee_id, m, messages, tools)
-            except BudgetExceeded:
-                raise
             except RateLimited as e:
                 last = e
                 if attempt < 2:
