@@ -68,3 +68,5 @@ DOWNLOAD_MAX = int(env("DOWNLOAD_MAX", "5"))
 # Hosts de LLM permitidos (anti-exfiltração): perfil com outro endereço é recusado na criação e na chamada.
 LLM_HOSTS = ("inference-api.nousresearch.com", "openrouter.ai", "api.openai.com", "api.anthropic.com")
 LLM_TIMEOUT = int(env("LLM_TIMEOUT", "120"))
+OWNER_EMAIL = env("OWNER_EMAIL", "juniobc@gmail.com").strip().lower()   # única conta Google que entra como administrador
+SESSION_HOURS = int(env("SESSION_HOURS", "12"))

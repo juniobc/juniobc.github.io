@@ -2,10 +2,11 @@
 import hmac
 import os
 import pathlib
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+import time
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from ..engine import config, db, llm, secrets_store
+from ..engine import config, db, google_auth, llm, secrets_store
 
 app = FastAPI(title="Meridiano Digital")
 _conn = None
@@ -19,18 +20,52 @@ def conn():
     return _conn
 
 
+SESSION_COOKIE = "mer_session"
+
+
 def _check(given, env_name):
     want = config.env(env_name)
     if not want or not given or not hmac.compare_digest(given, want):
         raise HTTPException(401, "token inválido")
 
 
-def read_auth(x_token: str = Header(None), token: str = Query(None)):
-    _check(x_token or token, "MERIDIANO_API_TOKEN")
+def read_auth(request: Request, x_token: str = Header(None), token: str = Query(None)):
+    """Leitura do painel: token de leitura OU sessão de administrador do Google (cookie)."""
+    given = x_token or token
+    if given:
+        _check(given, "MERIDIANO_API_TOKEN")
+        return
+    if google_auth.session(conn(), request.cookies.get(SESSION_COOKIE)):
+        return
+    raise HTTPException(401, "token inválido")
 
 
-def admin_auth(x_admin_token: str = Header(None)):
-    _check(x_admin_token, "MERIDIANO_ADMIN_TOKEN")
+_recovery = {"fails": 0, "first": 0.0, "until": 0.0}   # tentativas erradas do token de recuperação (sem guardar o valor)
+
+
+def admin_auth(request: Request, x_admin_token: str = Header(None), x_csrf: str = Header(None)):
+    """Administrador: sessão do Google (cookie + X-CSRF) ou, como recuperação, o MERIDIANO_ADMIN_TOKEN do meridiano.env."""
+    if x_admin_token:
+        now = time.time()
+        if _recovery["until"] > now:
+            raise HTTPException(429, "muitas tentativas; aguarde 15 minutos")
+        want = config.env("MERIDIANO_ADMIN_TOKEN")
+        if want and hmac.compare_digest(x_admin_token, want):
+            _recovery.update(fails=0, first=0.0)
+            return
+        if now - _recovery["first"] > 900:
+            _recovery.update(fails=0, first=now)
+        _recovery["fails"] += 1
+        google_auth.event(conn(), "recuperacao_falha", detail="token de recuperação incorreto")
+        if _recovery["fails"] >= 5:
+            _recovery["until"] = now + 900
+        raise HTTPException(401, "token inválido")
+    sess = google_auth.session(conn(), request.cookies.get(SESSION_COOKIE))
+    if not sess:
+        raise HTTPException(401, "entre com o Google na aba Configurações")
+    if not x_csrf or not hmac.compare_digest(x_csrf, sess["csrf"]):
+        google_auth.event(conn(), "csrf_ausente", sess["email"], "ação de administrador sem o cabeçalho X-CSRF válido")
+        raise HTTPException(403, "proteção CSRF: recarregue a página")
 
 
 @app.get("/api/health")
@@ -237,12 +272,13 @@ def add_entry(e: Entry):
     return {"id": r["id"], "caixa": db.cash_cents(c) / 100}
 
 
-from . import llm_routes, pay_routes, store_routes  # noqa: E402
+from . import auth_routes, llm_routes, pay_routes, store_routes  # noqa: E402
 
 app.include_router(store_routes.router)
 app.include_router(pay_routes.router)
 store_routes.register(app, read_auth, admin_auth, conn)
 llm_routes.register(app, read_auth, admin_auth, conn)
+auth_routes.register(app, read_auth, admin_auth, conn)
 
 _web = pathlib.Path(__file__).parent.parent / "web" / "dist"
 if _web.is_dir():

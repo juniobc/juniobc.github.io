@@ -1,13 +1,12 @@
 import { useState } from 'react';
-import { admin, getAdmin, setAdmin } from './api.js';
+import { admin, getRecovery } from './api.js';
 
 const usd = (n) => 'US$ ' + Number(n || 0).toFixed(4).replace(/0+$/, '').replace(/\.$/, '.00');
 const price = (p) => (p.gratis ? 'grátis' : `US$ ${p.preco_entrada.toFixed(2)} / ${p.preco_saida.toFixed(2)} por milhão`);
 
-export default function Models({ llm, reload }) {
-  const [adm, setAdm] = useState(getAdmin());
+export default function Models({ llm, reload, me }) {
+  const adm = !!me?.logado || !!getRecovery();
   const [msg, setMsg] = useState('');
-  const [keys, setKeys] = useState({});
   const [caps, setCaps] = useState({});
   const [busy, setBusy] = useState(false);
   const run = async (fn, ok) => {
@@ -15,16 +14,11 @@ export default function Models({ llm, reload }) {
     try { await fn(); setMsg(ok || 'Feito.'); reload(); } catch (e) { setMsg(e.message); } finally { setBusy(false); }
   };
   if (!llm) return <p className="note">Carregando…</p>;
-  const keyNames = [...new Set(llm.perfis.filter((p) => !p.gratis || p.key_name !== 'nous').map((p) => p.key_name))];
   const options = llm.perfis.filter((p) => p.ligado);
   return (
     <>
       <section className="card">
-        <b>Token de administrador</b>
-        <input type="password" autoComplete="off" placeholder="Token de administrador (fica só neste navegador)" value={adm}
-          onChange={(e) => { setAdm(e.target.value); setAdmin(e.target.value.trim()); }} style={{ width: '100%', margin: '6px 0' }} />
-        <p className="note">Ver esta aba só precisa do token de leitura. Trocar modelo, ligar perfil, guardar chave e desligar a contingência exigem este token.</p>
-        {msg && <p className="note" role="status">{msg}</p>}
+        {adm ? <p className="note">Conectado como administrador. {msg}</p> : <p className="note">Para trocar modelo, ligar perfil ou desligar a contingência, entre com o Google na aba Configurações. {msg}</p>}
       </section>
 
       <section className="card">
@@ -61,14 +55,7 @@ export default function Models({ llm, reload }) {
           {!p.gratis && caps[p.id] && <button disabled={busy || !adm} onClick={() => run(() => admin('PATCH', `llm/profiles/${p.id}`, { daily_usd_cap: Number(String(caps[p.id]).replace(',', '.')) }), 'Limite salvo.')}>Salvar limite</button>}{' '}
           <button disabled={busy || !adm} onClick={() => run(() => admin('PATCH', `llm/profiles/${p.id}`, { enabled: !p.ligado }), p.ligado ? 'Perfil desligado.' : 'Perfil ligado.')}>{p.ligado ? 'Desligar' : 'Ligar'}</button></li>))}</ul>
 
-      <h2>Chaves</h2>
-      <p className="note">A chave vai direto para um arquivo protegido no servidor e nunca é mostrada de volta nem chega aos agentes.</p>
-      {keyNames.map((k) => (
-        <div key={k} style={{ marginBottom: 8 }}>
-          <small>{k}: {llm.perfis.some((p) => p.key_name === k && p.chave_configurada) ? 'configurada' : 'sem chave'}</small><br />
-          <input type="password" autoComplete="off" placeholder={`Chave ${k}`} value={keys[k] ?? ''} onChange={(e) => setKeys({ ...keys, [k]: e.target.value })} style={{ width: '70%', marginRight: 6 }} />
-          <button disabled={busy || !adm || !keys[k]} onClick={() => run(async () => { await admin('POST', `llm/keys/${k}`, { key: keys[k].trim() }); setKeys({ ...keys, [k]: '' }); }, `Chave ${k} guardada.`)}>Guardar</button>
-        </div>))}
+      <p className="note">As chaves dos provedores ficam na aba Configurações.</p>
 
       <h2>Uso de hoje por funcionário</h2>
       <ul className="feed">{llm.uso_por_agente.map((u) => <li key={u.nome}><b>{u.nome}</b>: {u.chamadas} chamadas, {u.tokens} tokens, {usd(u.custo_usd)}</li>)}
