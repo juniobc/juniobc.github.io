@@ -2619,3 +2619,9 @@ def test_dispatch_skips_someone_already_in_turn_and_respects_429_pause(conn):
     assert eng.dispatch_owner(conn, run=lambda c, e: None, wait=True) == 0
     eng.pause_until = 0
     assert eng.dispatch_owner(conn, run=lambda c, e: None, wait=True) == 1
+
+
+def test_google_start_answers_head_with_the_same_redirect(g):
+    g.configure()
+    r = g.client.head("/api/auth/google/start")
+    assert r.status_code == 302 and r.headers["location"].startswith("https://accounts.google.com/o/oauth2/v2/auth?")
