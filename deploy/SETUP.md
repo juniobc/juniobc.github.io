@@ -38,7 +38,7 @@ Só o que está fora do usuário `empresa`: Caddy/HTTPS (`meridiano.163-176-9-70
 ## Pagamentos e loja: dois caminhos para entregar o token (um só basta)
 O Junio precisa entregar **uma vez** o Access Token do Mercado Pago (Credenciais de produção) e a identificação do vendedor (nome e e-mail de contato, exigência legal).
 
-**(a) Painel.** O cartão "Pedidos para você" tem os campos. Exige o `MERIDIANO_ADMIN_TOKEN` (está no `meridiano.env`).
+**(a) Painel (caminho principal, sem o Spark).** Aba **Configurações**, cartão Mercado Pago: cole o token e o nome/e-mail do vendedor. Exige estar conectado com o Google (abaixo).
 
 **(b) Arquivos no servidor**, como o usuário `empresa`, sem reiniciar nada:
 ```
@@ -55,12 +55,12 @@ printf '%s\n' '{"seller_name": "Nome Completo", "contact_email": "contato@exempl
 - Cada pedido manda o `notification_url` (`PUBLIC_BASE_URL` + `/api/mp/webhook`) e as páginas de retorno ao Mercado Pago; **não é preciso configurar nada no painel deles**. `PUBLIC_BASE_URL` (padrão: `https://meridiano.163-176-9-70.sslip.io`) é o endereço público HTTPS que o Caddy expõe.
 - **Segurança do aviso:** o aviso do Mercado Pago é só uma dica. A venda só existe se a API do Mercado Pago, consultada com o nosso token, devolver `approved` com o mesmo valor, moeda BRL e o pedido nosso. Um aviso forjado não gera venda.
 - **Assinatura (opcional, recomendada):** em *Suas integrações > Webhooks* o Mercado Pago mostra a "Assinatura secreta". Se o administrador a gravar em `~/meridiano/secrets/mp-webhook-secret` (chmod 600), todo aviso passa a exigir `x-signature` válida; sem o arquivo, a confirmação pela API continua sendo a barreira.
-- Tokens de teste (`TEST-...`) usam o sandbox e **nunca** entram no caixa.
+- O fluxo é sempre com o Access Token de **produção** (`APP_USR-...`). Por segurança, qualquer pagamento que não seja real nunca entra no caixa.
 - Reembolso e chargeback viram lançamentos de despesa no caixa (reembolsos parciais, pela diferença). A taxa do Mercado Pago é lançada como despesa quando a API a informa.
 - Nenhum dado pessoal do comprador é guardado: só o id do pagamento e os valores.
 
 ## Quando a compra abre (e o que mostra o painel)
-O painel mostra uma linha **"Loja: aberta/fechada (motivo)"** e, por produto, por que a compra está fechada. A compra de um produto só abre quando **tudo** isto é verdade; senão a página mostra "Pagamento em breve" e ninguém é cobrado:
+O painel mostra uma linha **"Loja: aberta/fechada (motivo)"** e, por produto, por que a compra está fechada. A compra de um produto só abre quando **tudo** isto é verdade; senão a página mostra "Compra indisponível no momento" e ninguém é cobrado:
 1. produto **pronto** (todas as seções escritas) e com **texto de venda** e **preço**;
 2. **token do Mercado Pago verificado** (a verificação vale só para o token que está no arquivo agora);
 3. **vendedor identificado** (nome e e-mail);
@@ -69,9 +69,25 @@ O painel mostra uma linha **"Loja: aberta/fechada (motivo)"** e, por produto, po
 **Entrega:** a compra confirmada gera um link único, válido por 7 dias e com 5 downloads (PDF e Markdown). Os botões são formulários (POST), então pré-visualizadores de links não gastam downloads. Reembolso total ou chargeback revogam o link na hora. O PDF leva o número do pedido no rodapé. Variáveis: `DOWNLOAD_DAYS`, `DOWNLOAD_MAX`.
 
 ## Modelos de LLM por funcionário (perfis)
-- Cada funcionário tem um perfil de LLM (aba **Modelos** do painel; trocar exige o token de administrador). Os 8 `:free` da Nous vêm cadastrados; os pagos (Claude via Nous, Anthropic direta, OpenAI direta) vêm **desligados**.
-- Chaves: arquivo `~/meridiano/secrets/llm-<key_name>` (chmod 600, pasta 700) ou o campo "Chaves" da aba Modelos. Nomes usados: `nous` (também vale `NOUS_API_KEY` do ambiente), `anthropic`, `openai`, `openrouter`. A chave nunca vai ao banco, ao log nem aos agentes.
+- Cada funcionário tem um perfil de LLM (aba **Modelos** do painel; trocar exige a sessão de administrador do Google). Os 8 `:free` da Nous vêm cadastrados; os pagos (Claude via Nous, Anthropic direta, OpenAI direta) vêm **desligados**.
+- Chaves: arquivo `~/meridiano/secrets/llm-<key_name>` (chmod 600, pasta 700) ou o cartão de chaves da aba Configurações. Nomes usados: `nous` (também vale `NOUS_API_KEY` do ambiente), `anthropic`, `openai`, `openrouter`. A chave nunca vai ao banco, ao log nem aos agentes.
 - Hosts permitidos (anti-exfiltração): `inference-api.nousresearch.com`, `openrouter.ai`, `api.openai.com`, `api.anthropic.com`, só por https.
 - **Modo contingência** (ligado por padrão): só perfis grátis são chamados; a escolha de cada funcionário fica guardada e volta ao desligar.
 - Custo em USD por chamada = tokens x preço do perfil. Limite diário por perfil pago + teto global; ao bater, o funcionário usa o grátis padrão e o painel avisa. Ligar um perfil pago exige chave e limite diário.
-- Se a API do painel não enxerga `NOUS_API_KEY` (variável só do motor), grave a chave `nous` pelo painel para poder ligar os perfis pagos da Nous.
+- Se a API do painel não enxerga `NOUS_API_KEY` (variável só do motor), grave a chave `nous` na aba Configurações para poder ligar os perfis pagos da Nous.
+
+## Configurações e login do administrador com Google
+O dono entra no painel com **Entrar com Google** (OpenID Connect, code flow com PKCE, escopos só `openid` e `email`). Só a conta do dono (`OWNER_EMAIL`, padrão `juniobc@gmail.com`) entra; outra conta recebe 403 e a tentativa é registrada. A sessão (12 h) abre o painel sem digitar o token de leitura. Ações de administrador (chaves, token do Mercado Pago, modelos, contingência) exigem a sessão **e** o cabeçalho `X-CSRF`.
+
+**Credenciais do Google** (Client ID e Client Secret): arquivo `~/meridiano/secrets/google-oauth.json`, pasta 700, arquivo 600, exatamente:
+```
+{"client_id": "...apps.googleusercontent.com", "client_secret": "...", "owner_email": "juniobc@gmail.com"}
+```
+- Se o arquivo existir, o login já funciona sem reiniciar. `GET /api/auth/google/start` responde 302 para `accounts.google.com`; sem o arquivo responde 503 "login com Google não configurado".
+- Sem o arquivo, a aba Configurações mostra o cartão **Ativar login com Google**: cola o ID do cliente e a chave secreta (aceito **uma vez**, só com o token de leitura; depois 409). O e-mail do dono só muda no arquivo.
+- No Google Cloud Console: APIs e serviços → Credenciais → ID do cliente OAuth → Aplicativo da Web. URI de redirecionamento autorizado: `PUBLIC_BASE_URL` + `/api/auth/google/callback` (padrão `https://meridiano.163-176-9-70.sslip.io/api/auth/google/callback`).
+- Se o Google recusar o domínio `sslip.io` como URI de redirecionamento, será preciso um domínio próprio ou outro endereço https.
+
+**Recuperação:** se existir `MERIDIANO_ADMIN_TOKEN` no `meridiano.env`, ele continua valendo no lugar da sessão (cabeçalho `X-Admin-Token`; 5 erros bloqueiam por 15 min). Fica oculto na aba Configurações > Segurança.
+
+**Chaves pelo painel:** cartões Mercado Pago e chaves de LLM (Nous, OpenRouter, Anthropic, OpenAI e "outro compatível") com Salvar, Testar e Remover. Os valores nunca voltam do servidor, nem vão para log, banco ou erro. Os caminhos por arquivo (`mp-token`, `store.json`, `llm-<nome>`) continuam valendo como alternativa.

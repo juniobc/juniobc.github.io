@@ -93,7 +93,7 @@ def _parse_lists(r):
 
 
 def sale_state(conn, p):
-    """(aberto, motivo) para um produto com texto de venda. Qualquer item faltando mantém 'Pagamento em breve'."""
+    """(aberto, motivo) para um produto com texto de venda. Qualquer item faltando mantém a compra indisponível."""
     from . import secrets_store
     if not DELIVERY_READY:
         return False, "a entrega do produto ainda está desligada"
@@ -176,7 +176,7 @@ def render_product(conn, slug, nonce):
     if sale_state(conn, p)[0]:
         buy = f'<form method="post" action="/pub/loja/{e(p["slug"], quote=True)}/comprar"><button class="btn" type="submit">Comprar agora</button></form>'
     else:
-        buy = '<span class="soon">Pagamento em breve</span>'
+        buy = '<span class="soon">Compra indisponível no momento</span>'
     body = (f'<p><a href="/pub/loja/">Todos os produtos</a></p><h1>{e(p["headline"])}</h1><p class="sub">{e(p["subtitle"])}</p>'
             f'<p class="price">{brl(p["price_cents"])}</p>{buy}<p>{e(p["pitch"])}</p><h2>O que você leva</h2><ul>{benef}</ul>'
             f'<h2>Para quem é</h2><p>{e(p["audience"])}</p><h2>O que tem dentro</h2>'
@@ -188,14 +188,14 @@ def render_product(conn, slug, nonce):
 def render_index(conn, nonce):
     items = published(conn)
     if not items:
-        return _page("Loja", "<h1>Loja em preparação</h1><p>Em breve, materiais educativos prontos para você.</p>", nonce)
+        return _page("Loja", "<h1>Loja</h1><p>Nenhum produto à venda no momento.</p>", nonce)
     e = html.escape
     lis = "".join(f'<li><a href="/pub/loja/{e(i["slug"], quote=True)}/">{e(i["headline"])}</a> <span>({brl(i["price_cents"])})</span></li>' for i in items)
     return _page("Loja", f"<h1>Loja</h1><ul>{lis}</ul>", nonce)
 
 
 def render_soon(nonce):
-    return _page("Pagamento em breve", "<h1>Pagamento em breve</h1><p>O pagamento online ainda não está disponível. Volte em breve.</p>"
+    return _page("Compra indisponível", "<h1>Compra indisponível</h1><p>A compra deste produto não está disponível no momento. Nada foi cobrado.</p>"
                  '<p><a href="/pub/loja/">Voltar à loja</a></p>', nonce)
 
 

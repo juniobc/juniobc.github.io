@@ -1,13 +1,19 @@
 export const getToken = () => { try { return localStorage.getItem('mtoken') || ''; } catch { return ''; } };
 export const setToken = (t) => { try { localStorage.setItem('mtoken', t); } catch {} };
-export const getAdmin = () => { try { return localStorage.getItem('matoken') || ''; } catch { return ''; } };
-export const setAdmin = (t) => { try { localStorage.setItem('matoken', t); } catch {} };
-// Ações de administrador (token guardado só neste navegador, como o de leitura).
+// Administrador: sessão do Google (cookie HttpOnly) + cabeçalho X-CSRF. O token de recuperação do servidor é opcional e fica só nesta aba.
+let csrf = '';
+export const setCsrf = (c) => { csrf = c || ''; };
+export const getRecovery = () => { try { return sessionStorage.getItem('mrec') || ''; } catch { return ''; } };
+export const setRecovery = (t) => { try { t ? sessionStorage.setItem('mrec', t) : sessionStorage.removeItem('mrec'); } catch {} };
 export async function admin(method, path, body) {
-  const r = await fetch('api/' + path, { method, headers: { 'Content-Type': 'application/json', 'X-Admin-Token': getAdmin() }, body: body === undefined ? undefined : JSON.stringify(body) });
+  const headers = { 'Content-Type': 'application/json' };
+  const rec = getRecovery();
+  if (rec) headers['X-Admin-Token'] = rec; else headers['X-CSRF'] = csrf;
+  const r = await fetch('api/' + path, { method, headers, credentials: 'same-origin', body: body === undefined ? undefined : JSON.stringify(body) });
   let j = {};
   try { j = await r.json(); } catch {}
-  if (r.status === 401) throw new Error('Token de administrador ausente ou inválido.');
+  if (r.status === 401) throw new Error('Entre com o Google na aba Configurações.');
+  if (r.status === 429) throw new Error('Muitas tentativas. Aguarde alguns minutos.');
   if (!r.ok) throw new Error(typeof j.detail === 'string' ? j.detail : 'Não foi possível concluir (confira os campos).');
   return j;
 }
@@ -21,27 +27,4 @@ export async function post(path) {
   const r = await fetch('api/' + path, { method: 'POST', headers: { 'X-Token': getToken() } });
   if (!r.ok) throw new Error(String(r.status));
   return r.json();
-}
-// Envia o token do Mercado Pago. O token de admin e o do Mercado Pago ficam só na memória desta chamada: nada é guardado no navegador.
-export async function sendMpToken(adminToken, accessToken) {
-  const r = await fetch('api/secrets/mp-token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Admin-Token': adminToken },
-    body: JSON.stringify({ access_token: accessToken }),
-  });
-  let j = {};
-  try { j = await r.json(); } catch {}
-  if (!r.ok) throw new Error(r.status === 401 ? 'Token de administrador inválido.' : (j.detail || 'Não foi possível enviar.'));
-  return j;
-}
-export async function sendStoreSettings(adminToken, sellerName, contactEmail) {
-  const r = await fetch('api/store/settings', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Admin-Token': adminToken },
-    body: JSON.stringify({ seller_name: sellerName, contact_email: contactEmail }),
-  });
-  let j = {};
-  try { j = await r.json(); } catch {}
-  if (!r.ok) throw new Error(r.status === 401 ? 'Token de administrador inválido.' : (j.detail || (r.status === 422 ? 'Confira o nome e o e-mail.' : 'Não foi possível enviar.')));
-  return j;
 }

@@ -102,6 +102,30 @@ def save_key(key_name, raw):
     return True, "chave guardada em arquivo protegido"
 
 
+def test_key(key_name, base_url):
+    """Chamada mínima (listar modelos) para ver se a chave vale. Devolve (ok, mensagem) sem nunca incluir a chave."""
+    if not host_ok(base_url):
+        return False, "endereço fora da lista permitida"
+    key = read_key({"key_name": key_name})
+    if not key:
+        return False, "nenhuma chave configurada com esse nome"
+    base = base_url.rstrip("/")
+    headers = {"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION} if urlparse(base).hostname == "api.anthropic.com" else {"Authorization": "Bearer " + key}
+    try:
+        r = httpx.get(base + "/models", headers=headers, timeout=20)
+    except Exception:
+        return False, "não consegui falar com o provedor agora"
+    if r.status_code in (401, 403):
+        return False, f"o provedor recusou esta chave ({r.status_code})"
+    if r.status_code != 200:
+        return False, f"resposta inesperada do provedor ({r.status_code})"
+    try:
+        n = len((r.json() or {}).get("data") or [])
+    except ValueError:
+        n = 0
+    return True, f"chave aceita; {n} modelo(s) listado(s)" if n else "chave aceita"
+
+
 def settings(conn):
     r = conn.execute("SELECT contingency, global_usd_cap FROM llm_settings WHERE id=1").fetchone()
     return r or {"contingency": True, "global_usd_cap": 2}

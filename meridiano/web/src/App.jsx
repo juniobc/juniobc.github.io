@@ -1,60 +1,24 @@
 import { useEffect, useState } from 'react';
 import Office from './Office.jsx';
 import Models from './Models.jsx';
-import { api, post, sendMpToken, sendStoreSettings, getToken, setToken, getAdmin } from './api.js';
+import Settings from './Settings.jsx';
+import Login from './Login.jsx';
+import { api, post, getToken, setToken, setCsrf } from './api.js';
 
 const brl = (n) => 'R$ ' + Number(n).toFixed(2).replace('.', ',');
-const TABS = ['Escritório', 'Tarefas', 'Produtos', 'Ideias', 'Caixa', 'Modelos'];
+const TABS = ['Escritório', 'Tarefas', 'Produtos', 'Ideias', 'Caixa', 'Modelos', 'Configurações'];
 const MP_REQUEST = 'Preciso do access token do Mercado Pago';
-
-function MpTokenCard({ onSaved }) {
-  const [admin, setAdmin] = useState(getAdmin());
-  const [tok, setTok] = useState('');
-  const [nome, setNome] = useState('');
-  const [email, setEmail] = useState('');
-  const [msg, setMsg] = useState('');
-  const [busy, setBusy] = useState(false);
-  const send = async () => {
-    setBusy(true); setMsg('');
-    const feitos = [];
-    try {
-      if (nome.trim() || email.trim()) { await sendStoreSettings(admin.trim(), nome.trim(), email.trim()); feitos.push('identificação da loja'); setNome(''); setEmail(''); }
-      if (tok.trim()) {
-        const r = await sendMpToken(admin.trim(), tok.trim());
-        feitos.push(`token do Mercado Pago (${r.modo === 'teste' ? 'modo de teste' : 'produção'}${r.verificado ? ', confirmado' : ', ainda não confirmado'})`);
-        setTok('');
-      }
-      setAdmin('');
-      setMsg(`Pronto: recebi ${feitos.join(' e ')}. O token não aparece mais aqui.`);
-      onSaved();
-    } catch (e) { setMsg(`${feitos.length ? `Já recebi: ${feitos.join(', ')}. ` : ''}${e.message}`); } finally { setBusy(false); }
-  };
-  return (
-    <div>
-      <p><b>Preciso do access token do Mercado Pago</b> para receber pagamentos, e do seu nome e e-mail para identificar o vendedor na loja (a lei exige). Uma vez só:</p>
-      <ol>
-        <li>Entre em <b>mercadopago.com.br/developers</b> com a sua conta.</li>
-        <li>Vá em <b>Suas integrações</b> e crie uma aplicação (tipo <b>Checkout Pro</b>).</li>
-        <li>Abra <b>Credenciais de produção</b> e copie o <b>Access Token</b> (começa com <code>APP_USR-</code>).</li>
-        <li>Cole abaixo, com o token de administrador (quem montou o servidor te passa).</li>
-      </ol>
-      <input type="password" autoComplete="off" placeholder="Token de administrador" value={admin} onChange={(e) => setAdmin(e.target.value)} style={{ width: '100%', marginBottom: 6 }} />
-      <input type="password" autoComplete="off" placeholder="Access Token do Mercado Pago (APP_USR-...)" value={tok} onChange={(e) => setTok(e.target.value)} style={{ width: '100%', marginBottom: 6 }} />
-      <input type="text" autoComplete="name" placeholder="Seu nome completo (aparece na loja)" value={nome} onChange={(e) => setNome(e.target.value)} style={{ width: '100%', marginBottom: 6 }} />
-      <input type="email" autoComplete="email" placeholder="E-mail de contato (aparece na loja)" value={email} onChange={(e) => setEmail(e.target.value)} style={{ width: '100%', marginBottom: 6 }} />
-      <button disabled={busy || !admin || !(tok || (nome && email))} onClick={send}>{busy ? 'Enviando...' : 'Enviar com segurança'}</button>
-      {msg && <p className="note">{msg}</p>}
-      <p className="note">O token vai direto para o servidor, é guardado em arquivo protegido e nunca é mostrado de volta. Nenhum agente tem acesso a ele. O nome e o e-mail ficam públicos na loja. O Mercado Pago só recebe os pagamentos: sacar o dinheiro continua sendo com você. Se preferir, quem administra o servidor pode criar o arquivo <code>~/meridiano/secrets/mp-token</code> e este cartão some sozinho.</p>
-    </div>
-  );
-}
 
 export default function App() {
   const [auth, setAuth] = useState(!!getToken());
-  const [d, setD] = useState({ state: null, emps: [], msgs: [], tasks: [], prods: [], ledger: [], reqs: [], acts: [], hist: [], engine: null, loja: [], opps: [], orders: [], lojaStatus: null, llm: null });
+  useEffect(() => {   // sessão do Google (cookie): entra sem digitar token
+    if (auth) return;
+    api('auth/me').then(() => setAuth(true)).catch(() => {});
+  }, []);
+  const [d, setD] = useState({ state: null, emps: [], msgs: [], tasks: [], prods: [], ledger: [], reqs: [], acts: [], hist: [], engine: null, loja: [], opps: [], orders: [], lojaStatus: null, llm: null, me: null, llmKeys: [] });
   const [err, setErr] = useState('');
   const [loginErr, setLoginErr] = useState('');
-  const [tab, setTab] = useState(0);
+  const [tab, setTab] = useState(() => { try { return new URLSearchParams(window.location.search).get('aba') === 'config' ? 6 : 0; } catch { return 0; } });
   const [sel, setSel] = useState(null);
   const [card, setCard] = useState(null);
   const [now, setNow] = useState(Date.now());
@@ -73,9 +37,10 @@ export default function App() {
     let on = true;
     const load = async () => {
       try {
-        const [state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps, orders, lojaStatus, llm] = await Promise.all(
-          ['state', 'employees', 'messages?limit=40', 'tasks', 'products', 'ledger', 'owner-requests', 'activity?limit=30', 'history', 'engine', 'store/products', 'opportunities', 'orders', 'store/status', 'llm'].map(api));
-        if (on) { setD({ state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps, orders, lojaStatus, llm }); setErr(''); }
+        const [state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps, orders, lojaStatus, llm, me, llmKeys] = await Promise.all(
+          ['state', 'employees', 'messages?limit=40', 'tasks', 'products', 'ledger', 'owner-requests', 'activity?limit=30', 'history', 'engine', 'store/products', 'opportunities', 'orders', 'store/status', 'llm', 'auth/me', 'llm/keys'].map(api));
+        setCsrf(me.csrf);
+        if (on) { setD({ state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja, opps, orders, lojaStatus, llm, me, llmKeys }); setErr(''); }
       } catch (e) {
         if (e.message === '401') { setToken(''); setLoginErr('Token inválido. Confira e tente de novo.'); setAuth(false); } else setErr('Sem conexão com o servidor.');
       }
@@ -104,7 +69,7 @@ export default function App() {
       {d.reqs.filter((r) => !r.done).length > 0 && (
         <section className="card"><strong>Pedidos para você, Junio</strong>
           {d.reqs.filter((r) => !r.done).map((r) => (r.body.startsWith(MP_REQUEST)
-            ? <MpTokenCard key={r.id} onSaved={() => setNow(Date.now())} />
+            ? <p key={r.id}>{r.body} <button onClick={() => setTab(6)}>Abrir Configurações</button></p>
             : <p key={r.id}>{r.body} <small>({r.from_name || 'Sistema'})</small>{' '}
               <button onClick={() => post(`owner-requests/${r.id}/done`).catch(() => {})}>Feito</button></p>))}
         </section>)}
@@ -179,7 +144,8 @@ export default function App() {
           {!d.ledger.length && <li className="note">Nenhum lançamento. Caixa: R$ 0,00.</li>}</ul>
       </>}
 
-      {tab === 5 && <Models llm={d.llm} reload={() => setRev((x) => x + 1)} />}
+      {tab === 5 && <Models llm={d.llm} me={d.me} reload={() => setRev((x) => x + 1)} />}
+      {tab === 6 && <Settings me={d.me} reqs={d.reqs} llmKeys={d.llmKeys} reload={() => setRev((x) => x + 1)} goto={setTab} />}
     </div>
   );
 }

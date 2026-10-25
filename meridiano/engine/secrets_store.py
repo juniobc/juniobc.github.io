@@ -15,7 +15,7 @@ import httpx
 from . import config
 
 TOKEN_RE = re.compile(r"^(APP_USR|TEST)-[A-Za-z0-9_\-]{20,200}$")
-TOKEN_REQUEST = "Preciso do access token do Mercado Pago (Credenciais de produção) para receber pagamentos"
+TOKEN_REQUEST = "Preciso do access token do Mercado Pago (Credenciais de produção) para receber pagamentos. Abra a aba Configurações e cole no cartão Mercado Pago"
 TOKEN_FILE = "mp-token"
 LEGACY_FILE = "mp_access_token"     # nome usado na primeira versão do painel
 META_FILE = "mp-meta.json"
@@ -94,7 +94,7 @@ def problem():
         read_token()
         return None
     except (ValueError, OSError):
-        return f"o arquivo {os.path.basename(p)} existe, mas o conteúdo não parece um Access Token (esperado APP_USR-… ou TEST-…)"
+        return f"o arquivo {os.path.basename(p)} existe, mas o conteúdo não parece um Access Token (esperado um Access Token de produção, que começa com APP_USR-)"
 
 
 def configured():
@@ -198,7 +198,7 @@ def save_token(raw):
     """Caminho (a): valida o formato, confere com o Mercado Pago e grava. Devolve (ok, mensagem, estado). Nunca devolve o token."""
     token = _parse(raw or "")
     if not TOKEN_RE.match(token):
-        return False, "formato inválido: o Access Token começa com APP_USR- (produção) ou TEST- (teste)", None
+        return False, "formato inválido: o Access Token de produção começa com APP_USR-", None
     estado, texto = verify(token)
     if estado == "invalido":
         return False, texto, None
@@ -209,6 +209,16 @@ def save_token(raw):
     _write_private(META_FILE, json.dumps(meta))
     _state.update(fp=meta["fp"], last=time.time())
     return True, texto, meta
+
+
+def remove_token():
+    """Apaga o token (e a verificação) da pasta de segredos. O pedido ao dono reabre no próximo sync."""
+    for n in (TOKEN_FILE, LEGACY_FILE, META_FILE):
+        try:
+            os.unlink(_path(n))
+        except FileNotFoundError:
+            pass
+    _state.update(fp=None, last=0.0)
 
 
 def status():
@@ -248,6 +258,7 @@ def sync_owner_request(conn):
     venham do painel ou dos arquivos do servidor."""
     from . import store
     import_store_file(conn)
+    conn.execute("UPDATE owner_requests SET done=TRUE, resolution='texto atualizado' WHERE body LIKE 'Preciso do access token do Mercado Pago%%' AND body<>%s AND NOT done", (TOKEN_REQUEST,))
     if configured() and store.store_ready(conn):
         conn.execute("UPDATE owner_requests SET done=TRUE, resolution='token e identificação recebidos' WHERE body=%s AND NOT done", (TOKEN_REQUEST,))
     elif not conn.execute("SELECT 1 FROM owner_requests WHERE body=%s AND NOT done", (TOKEN_REQUEST,)).fetchone():

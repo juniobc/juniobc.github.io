@@ -3,7 +3,7 @@ Chaves nunca são devolvidas: só "configurada: sim/não"."""
 from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from ..engine import llm
+from ..engine import google_auth, llm
 
 
 class NewProfile(BaseModel):
@@ -159,4 +159,5 @@ def register(app, read_auth, admin_auth, conn_fn):
         ok, msg = llm.save_key(key_name, b.key)
         if not ok:
             raise HTTPException(400, msg)
+        google_auth.event(conn_fn(), "chave_salva", detail=f"llm-{key_name}")
         return {"configurada": True}

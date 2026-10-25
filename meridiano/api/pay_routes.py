@@ -36,7 +36,7 @@ def comprar(slug: str):
             return _msg("Produto não encontrado", "Este produto não está à venda.", 404)
         aberto, _motivo = store.sale_state(c, product)   # o motivo é para o painel, não para o cliente
         if not aberto:
-            return _msg("Pagamento em breve", "O pagamento online ainda não está disponível. Nada foi cobrado. Volte em breve.", 503)
+            return _msg("Compra indisponível", "A compra deste produto não está disponível no momento. Nada foi cobrado.", 503)
         order = payments.create_order(c, product)
         if not order:
             return _msg("Muitos pedidos agora", "Tente de novo em alguns minutos.", 429)

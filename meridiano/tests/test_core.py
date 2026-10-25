@@ -920,7 +920,7 @@ def test_store_page_is_static_escaped_and_locked_down(conn, monkeypatch):
     assert "7 dias" in html and "art. 49" in html and "Material educativo" in html
     assert "Junio Teste" in html and "mailto:junio@example.com" in html
     # sem checkout ainda: nada de botão de compra
-    assert "Pagamento em breve" in html and "<form" not in html and "Comprar" not in html
+    assert "Compra indisponível" in html and "<form" not in html and "Comprar" not in html
     assert "script" not in html.split("</style>")[1].lower().replace("&lt;script&gt;alert(1)&lt;/script&gt;", "")
     assert c.post("/pub/loja/copy-de-vendas/comprar").status_code == 503                                  # ninguém é cobrado
     assert conn.execute("SELECT COUNT(*) AS n FROM orders").fetchone()["n"] == 0
@@ -929,7 +929,7 @@ def test_store_page_is_static_escaped_and_locked_down(conn, monkeypatch):
 def test_store_publishes_only_when_everything_is_ready(conn, monkeypatch):
     from meridiano.engine import tools
     c = _client(conn, monkeypatch)
-    assert c.get("/pub/loja/").status_code == 200 and "Loja em preparação" in c.get("/pub/loja/").text
+    assert c.get("/pub/loja/").status_code == 200 and "Nenhum produto à venda" in c.get("/pub/loja/").text
     ceo = _ready_product(conn)
     assert c.get("/pub/loja/copy-de-vendas/").status_code == 404                                           # pronto, mas sem texto/preço
     tools.run_tool(conn, ceo, "write_store_copy", dict(GOOD_COPY, product_name="Copy de Vendas"))
@@ -1616,7 +1616,7 @@ def test_checkout_stays_closed_until_the_president_approves_and_charges_no_one(c
     assert r.status_code == 503 and conn.execute("SELECT COUNT(*) AS n FROM orders").fetchone()["n"] == 0
     assert shop.fake.calls == []
     page = shop.client.get("/pub/loja/copy-de-vendas/").text
-    assert "Comprar" not in page and "Pagamento em breve" in page
+    assert "Comprar" not in page and "Compra indisponível" in page
 
 
 def test_checkout_creates_order_and_preference_and_redirects(conn, shop, monkeypatch):
@@ -2194,3 +2194,288 @@ def test_list_llm_profiles_tool_shows_prices_and_no_keys(conn, secdir):
     assert "CONTINGÊNCIA LIGADO" in out and "grátis" in out and "0.10/0.50" in out and "chave-de-teste" not in out
     assert "list_llm_profiles" in [t["function"]["name"] for t in tools.TOOL_DEFS]
     assert any("llm_profile" in t["function"]["parameters"]["properties"] for t in tools.TOOL_DEFS if t["function"]["name"] == "hire_employee")
+
+
+# ---------------------------------------------------------------- Configurações: login com Google, sessão, CSRF e cartões de chaves
+import base64 as _b64
+import hashlib as _hl
+import json as _json
+from urllib.parse import parse_qs as _pq, urlparse as _up
+
+_CID = "123456789-abcdefgh.apps.googleusercontent.com"
+_SEC = "GOCSPX-segredo-do-google-123"
+
+
+def _idtoken(**over):
+    c = {"iss": "https://accounts.google.com", "aud": _CID, "exp": time.time() + 600, "nonce": "NONCE", "email": "juniobc@gmail.com", "email_verified": True}
+    c.update(over)
+    return "hdr." + _b64.urlsafe_b64encode(_json.dumps(c).encode()).decode().rstrip("=") + ".sig"
+
+
+class _Resp:
+    def __init__(self, code, data): self.status_code, self._d = code, data
+    def json(self): return self._d
+
+
+class Gauth:
+    pass
+
+
+@pytest.fixture()
+def g(conn, secdir, monkeypatch):
+    from meridiano.engine import config, google_auth
+    from meridiano.api import main
+    monkeypatch.setenv("MERIDIANO_API_TOKEN", "leitura")
+    monkeypatch.setenv("MERIDIANO_ADMIN_TOKEN", "recuperacao-do-admin")
+    monkeypatch.setattr(config, "PUBLIC_BASE_URL", "https://painel.exemplo.test")
+    main._conn = conn
+    main._recovery.update(fails=0, first=0.0, until=0.0)
+    o = Gauth()
+    o.conn, o.secdir, o.ga, o.main = conn, secdir, google_auth, main
+    o.client = TestClient(main.app, base_url="https://testserver", follow_redirects=False)
+    o.R = {"X-Token": "leitura"}
+    o.posts = []
+    o.token_reply = lambda data: _Resp(200, {"id_token": _idtoken(nonce=o.nonce, **o.over), "access_token": "x"})
+    o.over, o.nonce = {}, "NONCE"
+
+    def post(url, data=None, **k):
+        o.posts.append((url, data))
+        if data.get("code") == "codigo-invalido":
+            return _Resp(400, {"error": "invalid_grant"})
+        return o.token_reply(data)
+    monkeypatch.setattr(google_auth.httpx, "post", post)
+
+    def configure():
+        (secdir / "google-oauth.json").write_text(_json.dumps({"client_id": _CID, "client_secret": _SEC, "owner_email": "juniobc@gmail.com"}))
+    o.configure = configure
+
+    def start():
+        r = o.client.get("/api/auth/google/start")
+        q = _pq(_up(r.headers["location"]).query)
+        o.nonce = conn.execute("SELECT nonce FROM oauth_states WHERE state=%s", (q["state"][0],)).fetchone()["nonce"]
+        return r, q
+    o.start = start
+
+    def login():
+        r, q = o.start()
+        cb = o.client.get("/api/auth/google/callback", params={"code": "abc", "state": q["state"][0]})
+        assert cb.status_code == 303, cb.text
+        me = o.client.get("/api/auth/me", headers=o.R).json()
+        o.csrf = me["csrf"]
+        return cb, me
+    o.login = login
+    return o
+
+
+def _secret_free(*texts):
+    for t in texts:
+        assert _SEC not in t and "segredo-do-google" not in t
+
+
+def test_google_not_configured_start_is_503_and_setup_is_once_and_validated(g):
+    assert g.client.get("/api/auth/google/start").status_code == 503
+    body = {"client_id": _CID, "client_secret": _SEC, "owner_email": "juniobc@gmail.com"}
+    assert g.client.post("/api/auth/google/setup", json=body).status_code == 401                  # exige o token de leitura
+    r = g.client.post("/api/auth/google/setup", json={**body, "owner_email": "outra@gmail.com"}, headers=g.R)
+    assert r.status_code == 400 and not (g.secdir / "google-oauth.json").exists()                  # e-mail do dono não muda pelo painel
+    orig = g.ga.httpx.post
+    g.ga.httpx.post = lambda *a, **k: _Resp(401, {"error": "invalid_client"})
+    r = g.client.post("/api/auth/google/setup", json=body, headers=g.R)
+    assert r.status_code == 400 and not (g.secdir / "google-oauth.json").exists(); _secret_free(r.text)
+    g.ga.httpx.post = orig
+    r = g.client.post("/api/auth/google/setup", json=body, headers=g.R)
+    assert r.status_code == 200; _secret_free(r.text)
+    f = g.secdir / "google-oauth.json"
+    assert oct(f.stat().st_mode & 0o777) == "0o600" and _json.loads(f.read_text())["client_secret"] == _SEC
+    r = g.client.post("/api/auth/google/setup", json={**body, "client_secret": "outro-segredo-qualquer"}, headers=g.R)
+    assert r.status_code == 409 and _json.loads(f.read_text())["client_secret"] == _SEC             # uma vez só
+    assert g.client.get("/api/auth/google/start").status_code == 302                               # já funciona sem reiniciar
+    assert "configuracao_google" in [e["tipo"] for e in g.client.get("/api/auth/events", headers=g.R).json()]
+
+
+def test_google_start_redirect_has_pkce_state_nonce_fixed_redirect_and_safe_cookie(g):
+    g.configure()
+    r, q = g.start()
+    assert r.status_code == 302 and r.headers["location"].startswith("https://accounts.google.com/o/oauth2/v2/auth?")
+    assert q["client_id"] == [_CID] and q["redirect_uri"] == ["https://painel.exemplo.test/api/auth/google/callback"]
+    assert q["scope"] == ["openid email"] and q["response_type"] == ["code"] and q["code_challenge_method"] == ["S256"]
+    assert q["state"][0] and q["nonce"][0] and q["code_challenge"][0] and _SEC not in r.headers["location"]
+    ck = r.headers["set-cookie"].lower()
+    assert "mer_oauth=" in ck and "httponly" in ck and "secure" in ck and "samesite=lax" in ck and "max-age=600" in ck
+
+
+def test_google_login_creates_session_with_flags_csrf_and_hashed_cookie(g):
+    g.configure()
+    cb, me = g.login()
+    ck = cb.headers["set-cookie"].lower()
+    assert "mer_session=" in ck and "httponly" in ck and "secure" in ck and "samesite=lax" in ck and f"max-age={12 * 3600}" in ck
+    assert cb.headers["location"] == "https://painel.exemplo.test/?aba=config"
+    assert me["logado"] and me["email"] == "juniobc@gmail.com" and me["csrf"] and me["google_configurado"]
+    token = g.client.cookies.get("mer_session")
+    row = g.conn.execute("SELECT * FROM admin_sessions").fetchone()
+    assert row["token_hash"] == _hl.sha256(token.encode()).hexdigest() and token not in str(dict(row))
+    url, data = g.posts[-1]                                                                          # troca do code servidor a servidor, com PKCE
+    assert url == "https://oauth2.googleapis.com/token" and data["client_secret"] == _SEC and data["redirect_uri"] == "https://painel.exemplo.test/api/auth/google/callback"
+    ch = _pq(_up(g.client.get("/api/auth/google/start").headers["location"]).query)["code_challenge"][0]
+    assert _b64.urlsafe_b64encode(_hl.sha256(data["code_verifier"].encode()).digest()).decode().rstrip("=") != ""   # verifier existe e tem o formato do desafio
+    assert len(ch) == 43
+
+
+def test_admin_actions_need_session_and_matching_csrf(g):
+    g.configure()
+    assert g.client.post("/api/llm/contingency", json={"on": False}).status_code == 401              # sem sessão
+    g.login()
+    assert g.client.post("/api/llm/contingency", json={"on": False}).status_code == 403              # sessão sem X-CSRF
+    assert g.client.post("/api/llm/contingency", json={"on": False}, headers={"X-CSRF": "errado"}).status_code == 403
+    assert g.client.post("/api/llm/contingency", json={"on": False}, headers={"X-CSRF": g.csrf}).status_code == 200
+    assert g.conn.execute("SELECT contingency FROM llm_settings").fetchone()["contingency"] is False
+    assert "csrf_ausente" in [e["kind"] for e in g.ga.events(g.conn)]
+    other = TestClient(g.main.app, base_url="https://testserver")                                    # outro navegador, mesmo CSRF, sem cookie
+    assert other.post("/api/llm/contingency", json={"on": True}, headers={"X-CSRF": g.csrf}).status_code == 401
+    # logout encerra
+    assert g.client.post("/api/auth/logout", headers={"X-CSRF": g.csrf}).status_code == 200
+    assert g.client.post("/api/llm/contingency", json={"on": True}, headers={"X-CSRF": g.csrf}).status_code == 401
+    assert g.conn.execute("SELECT COUNT(*) AS n FROM admin_sessions").fetchone()["n"] == 0
+
+
+def test_expired_session_is_rejected(g):
+    g.configure(); g.login()
+    g.conn.execute("UPDATE admin_sessions SET expires_at = now() - interval '1 minute'")
+    assert g.client.post("/api/llm/contingency", json={"on": False}, headers={"X-CSRF": g.csrf}).status_code == 401
+    assert g.client.get("/api/auth/me", headers=g.R).json()["logado"] is False
+
+
+@pytest.mark.parametrize("what", ["state_errado", "sem_cookie", "reuso", "nonce", "email", "nao_verificado", "aud", "iss", "expirado", "google_recusa", "google_error"])
+def test_google_callback_rejections_never_create_a_session(g, what):
+    g.configure()
+    r, q = g.start()
+    state = q["state"][0]
+    if what == "state_errado":
+        cb = g.client.get("/api/auth/google/callback", params={"code": "abc", "state": "outro"})
+        want = 400
+    elif what == "sem_cookie":
+        g.client.cookies.clear()
+        cb = g.client.get("/api/auth/google/callback", params={"code": "abc", "state": state})
+        want = 400
+    elif what == "reuso":
+        assert g.client.get("/api/auth/google/callback", params={"code": "abc", "state": state}).status_code == 303
+        g.conn.execute("DELETE FROM admin_sessions")
+        g.client.cookies.set("mer_oauth", state)
+        cb = g.client.get("/api/auth/google/callback", params={"code": "abc", "state": state})
+        want = 400
+    else:
+        want = {"nonce": 400, "email": 403, "nao_verificado": 403, "aud": 400, "iss": 400, "expirado": 400, "google_recusa": 502}.get(what, 400)
+        if what == "nonce":
+            g.token_reply = lambda d: _Resp(200, {"id_token": _idtoken(nonce="outro")})
+        elif what == "email":
+            g.over = {"email": "intruso@gmail.com"}
+        elif what == "nao_verificado":
+            g.over = {"email_verified": False}
+        elif what == "aud":
+            g.over = {"aud": "outro-cliente"}
+        elif what == "iss":
+            g.over = {"iss": "https://evil.example.com"}
+        elif what == "expirado":
+            g.over = {"exp": time.time() - 5}
+        elif what == "google_recusa":
+            g.token_reply = lambda d: _Resp(400, {"error": "invalid_grant"})
+        if what == "google_error":
+            cb = g.client.get("/api/auth/google/callback", params={"error": "access_denied", "state": state})
+        else:
+            cb = g.client.get("/api/auth/google/callback", params={"code": "abc", "state": state})
+    assert cb.status_code == want, (what, cb.status_code, cb.text)
+    if what != "reuso":
+        assert g.conn.execute("SELECT COUNT(*) AS n FROM admin_sessions").fetchone()["n"] == 0
+    assert "mer_session" not in cb.headers.get("set-cookie", "")
+    _secret_free(cb.text)
+    if what == "email":
+        ev = [e for e in g.ga.events(g.conn) if e["kind"] == "login_negado"]
+        assert ev and ev[0]["email"] == "intruso@gmail.com"                                          # tentativa registrada
+
+
+def test_email_comparison_ignores_case_and_old_states_expire(g):
+    g.configure()
+    g.over = {"email": "JunioBC@Gmail.com"}
+    cb, me = g.login()
+    assert me["logado"]
+    r, q = g.start()
+    g.conn.execute("UPDATE oauth_states SET created_at = now() - interval '11 minutes'")
+    cb = g.client.get("/api/auth/google/callback", params={"code": "abc", "state": q["state"][0]})
+    assert cb.status_code == 400
+
+
+def test_recovery_token_works_but_is_locked_after_five_failures(g):
+    assert g.client.post("/api/llm/contingency", json={"on": False}, headers={"X-Admin-Token": "recuperacao-do-admin"}).status_code == 200
+    for i in range(5):
+        assert g.client.post("/api/llm/contingency", json={"on": True}, headers={"X-Admin-Token": f"errado-{i}"}).status_code == 401
+    assert g.client.post("/api/llm/contingency", json={"on": True}, headers={"X-Admin-Token": "recuperacao-do-admin"}).status_code == 429   # bloqueio de 15 min
+    ev = g.ga.events(g.conn)
+    assert sum(1 for e in ev if e["kind"] == "recuperacao_falha") == 5 and "errado-" not in str([dict(e) for e in ev])
+
+
+def test_llm_key_cards_save_test_remove_and_never_echo_the_key(g, monkeypatch):
+    from meridiano.engine import llm
+    g.configure(); g.login()
+    H = {"X-CSRF": g.csrf}
+    secret = "sk-ant-chave-super-secreta-999"
+    assert g.client.post("/api/llm/keys/anthropic", json={"key": secret}, headers=H).status_code == 200
+    r = g.client.get("/api/llm/keys", headers=g.R)
+    ant = next(k for k in r.json() if k["key_name"] == "anthropic")
+    assert ant["configurada"] and ant["fonte"] == "arquivo" and secret not in r.text and next(k for k in r.json() if k["key_name"] == "openai")["configurada"] is False
+    seen = {}
+
+    def get(url, headers=None, timeout=None):
+        seen.update(url=url, headers=headers)
+        return _Resp(200, {"data": [{"id": "a"}, {"id": "b"}]})
+    monkeypatch.setattr(llm.httpx, "get", get)
+    t = g.client.post("/api/llm/keys/anthropic/test", json={}, headers=H)
+    assert t.json()["ok"] and "2 modelo" in t.json()["mensagem"] and secret not in t.text
+    assert seen["url"] == "https://api.anthropic.com/v1/models" and seen["headers"]["x-api-key"] == secret
+    monkeypatch.setattr(llm.httpx, "get", lambda *a, **k: _Resp(401, {}))
+    t = g.client.post("/api/llm/keys/anthropic/test", json={}, headers=H)
+    assert t.json()["ok"] is False and "recusou" in t.json()["mensagem"] and secret not in t.text
+    # "outro compatível": endereço precisa estar na lista
+    assert g.client.post("/api/llm/keys/meu-outro", json={"key": "chave-qualquer-123"}, headers=H).status_code == 200
+    assert g.client.post("/api/llm/keys/meu-outro/test", json={"base_url": "https://evil.example.com/v1"}, headers=H).json()["ok"] is False
+    assert g.client.post("/api/llm/keys/meu-outro/test", json={}, headers=H).status_code == 400
+    assert g.client.post("/api/llm/keys/..%2Fmp-token", json={"key": "chave-qualquer-123"}, headers=H).status_code in (400, 404, 405)
+    assert g.client.delete("/api/llm/keys/anthropic", headers=H).status_code == 200
+    assert not (g.secdir / "llm-anthropic").exists() and g.client.delete("/api/llm/keys/anthropic", headers=H).status_code == 404
+    assert g.client.delete("/api/llm/keys/anthropic").status_code == 403                             # sem CSRF
+    evs = str([dict(e) for e in g.ga.events(g.conn)])
+    assert secret not in evs and "chave_salva" in evs and "chave_removida" in evs
+
+
+def test_mp_card_remove_test_and_request_text(g, monkeypatch):
+    from meridiano.engine import secrets_store as ss
+    g.configure(); g.login()
+    H = {"X-CSRF": g.csrf}
+    g.conn.execute("INSERT INTO owner_requests(from_id,body) VALUES (NULL,'Preciso do access token do Mercado Pago (Credenciais de produção) para receber pagamentos')")   # texto antigo
+    ss.sync_owner_request(g.conn)
+    open_ = [r["body"] for r in g.conn.execute("SELECT body FROM owner_requests WHERE NOT done").fetchall()]
+    assert open_ == [ss.TOKEN_REQUEST] and "Configurações" in ss.TOKEN_REQUEST                      # uma só, com o endereço novo
+    tok = "APP_USR-" + "a1b2c3d4" * 4
+    monkeypatch.setattr(ss, "verify", lambda t: ("ok", "token aceito pelo Mercado Pago"))
+    assert g.client.post("/api/secrets/mp-token/test", headers=H).status_code == 400                # nada para testar
+    assert g.client.post("/api/secrets/mp-token", json={"access_token": tok}, headers=H).status_code == 200
+    r = g.client.post("/api/secrets/mp-token/test", headers=H)
+    assert r.status_code == 200 and r.json()["verificado"] and tok not in r.text
+    r = g.client.delete("/api/secrets/mp-token", headers=H)
+    assert r.status_code == 200 and r.json()["configurado"] is False and tok not in r.text
+    assert not (g.secdir / "mp-token").exists() and not (g.secdir / "mp-meta.json").exists()
+    assert g.conn.execute("SELECT COUNT(*) AS n FROM owner_requests WHERE NOT done").fetchone()["n"] == 1   # o pedido ao dono reabriu
+
+
+def test_no_test_mode_wording_in_customer_pages_or_settings_text():
+    from meridiano.engine import store, secrets_store as ss
+    for t in (ss.TOKEN_REQUEST, store.render_soon("n")):
+        assert "em breve" not in t.lower() and "teste" not in t.lower() and "ensaio" not in t.lower()
+
+
+def test_google_session_also_opens_the_panel_without_the_read_token(g):
+    g.configure()
+    assert g.client.get("/api/state").status_code == 401
+    g.login()
+    assert g.client.get("/api/state").status_code == 200 and g.client.get("/api/employees").status_code == 200   # só o cookie, sem X-Token
+    assert TestClient(g.main.app, base_url="https://testserver").get("/api/state").status_code == 401
+    assert g.client.get("/api/state", headers={"X-Token": "errado"}).status_code == 401                          # token errado não cai para a sessão
