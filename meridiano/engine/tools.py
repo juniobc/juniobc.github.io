@@ -45,6 +45,13 @@ SPECS = [
      "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "approve": {"type": "boolean"}, "note": {"type": "string"}}, "required": ["name", "approve", "note"]}},
     {"name": "run_custom_tool", "description": "Executa uma ferramenta ATIVA, isolada, com os argumentos dados.",
      "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "args": {"type": "object"}}, "required": ["name"]}},
+    {"name": "write_store_copy", "description": "Escreve o TEXTO DE VENDA de um produto pronto, em campos (nunca HTML). Honesto: sem promessa de ganho, sem 'garantido', sem '100%'. A loja monta a página sozinha.",
+     "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "headline": {"type": "string"}, "subtitle": {"type": "string"}, "pitch": {"type": "string"},
+                    "benefits": {"type": "array", "items": {"type": "string"}}, "audience": {"type": "string"},
+                    "faq": {"type": "array", "items": {"type": "object", "properties": {"q": {"type": "string"}, "a": {"type": "string"}}}}},
+                    "required": ["product_name", "headline", "subtitle", "pitch", "benefits", "audience", "faq"]}},
+    {"name": "set_price", "description": "Presidente ou CEO definem o preço de venda de um produto (mínimo R$ 9,00, máximo R$ 1.000,00).",
+     "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "price_brl": {"type": "number"}, "reason": {"type": "string"}}, "required": ["product_name", "price_brl", "reason"]}},
     {"name": "list_team", "description": "Lista os funcionários ativos.", "parameters": {"type": "object", "properties": {}}},
 ]
 TOOL_DEFS = [{"type": "function", "function": s} for s in SPECS]
@@ -197,6 +204,53 @@ def _propose_tool(conn, me, args):
     return f"ferramenta '{name}' v{version} passou na validação e nos {res['result'].get('testes', '?')} teste(s); aguarda revisão de outro chefe (read_tool + approve_tool)"
 
 
+def _find_product(conn, name):
+    return next((p for p in conn.execute("SELECT id,name,status,price_cents FROM products").fetchall() if similar(p["name"], name)), None)
+
+
+def _write_store_copy(conn, me, args):
+    from . import store
+    prod = _find_product(conn, args["product_name"])
+    if not prod:
+        return "erro: produto não existe (use list_products)"
+    if prod["status"] != "pronto":
+        return "erro: o produto ainda não está pronto; termine todas as seções antes do texto de venda"
+    fields = {k: args.get(k) for k in ("headline", "subtitle", "pitch", "benefits", "audience", "faq")}
+    fields = {k: (v if v is not None else ("" if k in ("headline", "subtitle", "pitch", "audience") else [])) for k, v in fields.items()}
+    problems = store.check_copy(fields)
+    if problems:
+        return "erro: texto de venda recusado: " + "; ".join(problems)
+    slug = slugify(prod["name"])
+    conn.execute(
+        "INSERT INTO product_store(product_id,slug,headline,subtitle,pitch,benefits,audience,faq,written_by) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+        "ON CONFLICT (product_id) DO UPDATE SET headline=EXCLUDED.headline, subtitle=EXCLUDED.subtitle, pitch=EXCLUDED.pitch, benefits=EXCLUDED.benefits, "
+        "audience=EXCLUDED.audience, faq=EXCLUDED.faq, written_by=EXCLUDED.written_by, updated_at=now()",
+        (prod["id"], slug, fields["headline"].strip(), fields["subtitle"].strip(), fields["pitch"].strip(), json.dumps([b.strip() for b in fields["benefits"]], ensure_ascii=False),
+         fields["audience"].strip(), json.dumps([{"q": str(i["q"]).strip(), "a": str(i["a"]).strip()} for i in fields["faq"]], ensure_ascii=False), me["id"]))
+    falta = "" if prod["price_cents"] else " Falta definir o preço com set_price."
+    return f"texto de venda de '{prod['name']}' salvo; página em /pub/loja/{slug}/ (aparece quando houver preço e a loja estiver identificada).{falta}"
+
+
+def _set_price(conn, me, args):
+    from . import store
+    if not REVIEWER_RE.search(me["role"]):
+        return "erro: só Presidente ou CEO definem preço"
+    prod = _find_product(conn, args["product_name"])
+    if not prod:
+        return "erro: produto não existe (use list_products)"
+    try:
+        cents = int(round(float(args["price_brl"]) * 100))
+    except (TypeError, ValueError):
+        return "erro: preço inválido"
+    if cents < store.MIN_PRICE_CENTS or cents > store.MAX_PRICE_CENTS:
+        return f"erro: o preço precisa ficar entre {store.brl(store.MIN_PRICE_CENTS)} e {store.brl(store.MAX_PRICE_CENTS)}"
+    if len(str(args.get("reason", "")).strip()) < 5:
+        return "erro: informe o motivo do preço"
+    conn.execute("UPDATE products SET price_cents=%s, updated_at=now() WHERE id=%s", (cents, prod["id"]))
+    conn.execute("INSERT INTO messages(from_id,to_id,body) VALUES (%s,NULL,%s)", (me["id"], f"Preço de '{prod['name']}': {store.brl(cents)}. Motivo: {str(args['reason'])[:200]}"))
+    return f"preço de '{prod['name']}' definido em {store.brl(cents)}"
+
+
 def process_drafts(conn):
     """Quando o portão abre, roda os testes dos rascunhos e os manda para revisão (ou recusa). Devolve quantos processou."""
     from . import sandbox
@@ -278,6 +332,8 @@ def _record_activity(conn, me, name, args, out):
         activity(conn, me["id"], "pesquisando", f"Pesquisa: {str(args.get('query', ''))[:80]}")
     elif name in ("propose_tool", "approve_tool", "run_custom_tool"):
         activity(conn, me["id"], "planejando", {"propose_tool": "Propôs ferramenta", "approve_tool": "Revisou ferramenta", "run_custom_tool": "Usou ferramenta"}[name] + f" {str(args.get('name', ''))[:40]}")
+    elif name in ("write_store_copy", "set_price"):
+        activity(conn, me["id"], "escrevendo_produto", ("Escreve texto de venda de " if name == "write_store_copy" else "Define preço de ") + str(args.get("product_name", ""))[:60])
     elif name == "write_section":
         activity(conn, me["id"], "escrevendo_produto", f"Escreve {str(args.get('product_name', ''))[:60]}, seção {args.get('section_number')}")
     elif name == "request_rewrite":
@@ -390,6 +446,10 @@ def _run_tool(conn, me, name, args):
             return _approve_tool(conn, me, args)
         if name == "run_custom_tool":
             return _run_custom_tool(conn, me, args)
+        if name == "write_store_copy":
+            return _write_store_copy(conn, me, args)
+        if name == "set_price":
+            return _set_price(conn, me, args)
         if name == "write_section":
             prod, sec = _find_section(conn, args["product_name"], args["section_number"])
             if not sec:

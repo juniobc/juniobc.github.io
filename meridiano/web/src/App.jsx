@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import Office from './Office.jsx';
-import { api, post, sendMpToken, getToken, setToken } from './api.js';
+import { api, post, sendMpToken, sendStoreSettings, getToken, setToken } from './api.js';
 
 const brl = (n) => 'R$ ' + Number(n).toFixed(2).replace('.', ',');
 const TABS = ['Escritório', 'Tarefas', 'Produtos', 'Caixa'];
@@ -9,49 +9,48 @@ const MP_REQUEST = 'Preciso do access token do Mercado Pago';
 function MpTokenCard({ onSaved }) {
   const [admin, setAdmin] = useState('');
   const [tok, setTok] = useState('');
+  const [nome, setNome] = useState('');
+  const [email, setEmail] = useState('');
   const [msg, setMsg] = useState('');
   const [busy, setBusy] = useState(false);
   const send = async () => {
     setBusy(true); setMsg('');
+    const feitos = [];
     try {
-      const r = await sendMpToken(admin.trim(), tok.trim());
-      setTok(''); setAdmin('');
-      setMsg(`Pronto: token recebido (${r.modo === 'teste' ? 'modo de teste' : 'produção'}${r.verificado ? ', confirmado pelo Mercado Pago' : ', ainda não confirmado'}). Ele não aparece mais aqui.`);
+      if (nome.trim() || email.trim()) { await sendStoreSettings(admin.trim(), nome.trim(), email.trim()); feitos.push('identificação da loja'); setNome(''); setEmail(''); }
+      if (tok.trim()) {
+        const r = await sendMpToken(admin.trim(), tok.trim());
+        feitos.push(`token do Mercado Pago (${r.modo === 'teste' ? 'modo de teste' : 'produção'}${r.verificado ? ', confirmado' : ', ainda não confirmado'})`);
+        setTok('');
+      }
+      setAdmin('');
+      setMsg(`Pronto: recebi ${feitos.join(' e ')}. O token não aparece mais aqui.`);
       onSaved();
-    } catch (e) { setMsg(e.message); } finally { setBusy(false); }
+    } catch (e) { setMsg(`${feitos.length ? `Já recebi: ${feitos.join(', ')}. ` : ''}${e.message}`); } finally { setBusy(false); }
   };
   return (
     <div>
-      <p><b>Preciso do access token do Mercado Pago</b> para receber pagamentos. Você só faz isso uma vez:</p>
+      <p><b>Preciso do access token do Mercado Pago</b> para receber pagamentos, e do seu nome e e-mail para identificar o vendedor na loja (a lei exige). Uma vez só:</p>
       <ol>
         <li>Entre em <b>mercadopago.com.br/developers</b> com a sua conta.</li>
         <li>Vá em <b>Suas integrações</b> e crie uma aplicação (tipo <b>Checkout Pro</b>).</li>
         <li>Abra <b>Credenciais de produção</b> e copie o <b>Access Token</b> (começa com <code>APP_USR-</code>).</li>
-        <li>Cole abaixo, junto com o token de administrador (quem montou o servidor te passa).</li>
+        <li>Cole abaixo, com o token de administrador (quem montou o servidor te passa).</li>
       </ol>
       <input type="password" autoComplete="off" placeholder="Token de administrador" value={admin} onChange={(e) => setAdmin(e.target.value)} style={{ width: '100%', marginBottom: 6 }} />
       <input type="password" autoComplete="off" placeholder="Access Token do Mercado Pago (APP_USR-...)" value={tok} onChange={(e) => setTok(e.target.value)} style={{ width: '100%', marginBottom: 6 }} />
-      <button disabled={busy || !admin || !tok} onClick={send}>{busy ? 'Enviando...' : 'Enviar token com segurança'}</button>
+      <input type="text" autoComplete="name" placeholder="Seu nome completo (aparece na loja)" value={nome} onChange={(e) => setNome(e.target.value)} style={{ width: '100%', marginBottom: 6 }} />
+      <input type="email" autoComplete="email" placeholder="E-mail de contato (aparece na loja)" value={email} onChange={(e) => setEmail(e.target.value)} style={{ width: '100%', marginBottom: 6 }} />
+      <button disabled={busy || !admin || !(tok || (nome && email))} onClick={send}>{busy ? 'Enviando...' : 'Enviar com segurança'}</button>
       {msg && <p className="note">{msg}</p>}
-      <p className="note">O token vai direto para o servidor, é guardado em arquivo protegido e nunca é mostrado de volta. Nenhum agente tem acesso a ele. O Mercado Pago só recebe os pagamentos: sacar o dinheiro continua sendo com você.</p>
+      <p className="note">O token vai direto para o servidor, é guardado em arquivo protegido e nunca é mostrado de volta. Nenhum agente tem acesso a ele. O nome e o e-mail ficam públicos na loja. O Mercado Pago só recebe os pagamentos: sacar o dinheiro continua sendo com você.</p>
     </div>
-  );
-}
-
-function Login({ onDone, error }) {
-  const [v, setV] = useState('');
-  return (
-    <div className="wrap"><h1>Meridiano Digital</h1>
-      {error && <p className="note" style={{ color: '#ff8a80' }}>{error}</p>}
-      <p className="note">Cole o token de acesso para ver a empresa.</p>
-      <input value={v} onChange={(e) => setV(e.target.value)} placeholder="token" type="password" />{' '}
-      <button onClick={() => { setToken(v.trim()); onDone(); }}>Entrar</button></div>
   );
 }
 
 export default function App() {
   const [auth, setAuth] = useState(!!getToken());
-  const [d, setD] = useState({ state: null, emps: [], msgs: [], tasks: [], prods: [], ledger: [], reqs: [], acts: [], hist: [], engine: null });
+  const [d, setD] = useState({ state: null, emps: [], msgs: [], tasks: [], prods: [], ledger: [], reqs: [], acts: [], hist: [], engine: null, loja: [] });
   const [err, setErr] = useState('');
   const [loginErr, setLoginErr] = useState('');
   const [tab, setTab] = useState(0);
@@ -72,9 +71,9 @@ export default function App() {
     let on = true;
     const load = async () => {
       try {
-        const [state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine] = await Promise.all(
-          ['state', 'employees', 'messages?limit=40', 'tasks', 'products', 'ledger', 'owner-requests', 'activity?limit=30', 'history', 'engine'].map(api));
-        if (on) { setD({ state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine }); setErr(''); }
+        const [state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja] = await Promise.all(
+          ['state', 'employees', 'messages?limit=40', 'tasks', 'products', 'ledger', 'owner-requests', 'activity?limit=30', 'history', 'engine', 'store/products'].map(api));
+        if (on) { setD({ state, emps, msgs, tasks, prods, ledger, reqs, acts, hist, engine, loja }); setErr(''); }
       } catch (e) {
         if (e.message === '401') { setToken(''); setLoginErr('Token inválido. Confira e tente de novo.'); setAuth(false); } else setErr('Sem conexão com o servidor.');
       }
@@ -145,6 +144,10 @@ export default function App() {
 
       {tab === 2 && <ul className="feed">{d.prods.map((p) => (
         <li key={p.id}><b>{p.name}</b> <small>({p.status}{p.price_cents ? ` · ${brl(p.price_cents / 100)}` : ' · sem preço'})</small><br /><b>{p.secoes_total > 0 ? `${p.secoes_prontas} de ${p.secoes_total} seções` : 'sem plano de seções'}, {p.caracteres} caracteres</b><br />{p.description}
+          {(() => { const l = d.loja.find((x) => x.id === p.id); if (!l) return null;
+            return <p className="note">Loja: {l.publicado ? <a href={l.url} target="_blank" rel="noreferrer">publicada ({l.url})</a>
+              : p.status !== 'pronto' ? 'o produto ainda não está pronto'
+              : !l.tem_texto ? 'falta o texto de venda' : !p.price_cents ? 'falta o preço' : 'falta a identificação do vendedor (nome e e-mail)'}</p>; })()}
           {p.content && <details><summary>Ver conteúdo</summary><pre style={{ whiteSpace: 'pre-wrap' }}>{p.content}</pre></details>}</li>))}
         {!d.prods.length && <li className="note">Nenhum produto ainda.</li>}</ul>}
 

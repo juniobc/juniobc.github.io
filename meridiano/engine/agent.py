@@ -31,7 +31,16 @@ def production_block(conn, me):
             if nxt:
                 target = (p["name"], nxt)
     if not target:
-        return "PRODUÇÃO: todos os produtos estão prontos para a loja. Revise textos fracos com request_rewrite ou escreva o texto de venda e o conteúdo de blog/SEO de um produto.\n" + "\n".join(lines)
+        falta = conn.execute("SELECT p.name, (s.product_id IS NULL) AS sem_texto, (p.price_cents IS NULL) AS sem_preco FROM products p "
+                             "LEFT JOIN product_store s ON s.product_id=p.id WHERE p.status='pronto' AND (s.product_id IS NULL OR p.price_cents IS NULL) ORDER BY p.id").fetchone()
+        if falta and falta["sem_texto"]:
+            return (f"LOJA (prioridade): '{falta['name']}' está pronto mas não tem texto de venda. Escreva AGORA com write_store_copy: título forte, subtítulo, "
+                    "apresentação, 3 a 7 benefícios reais, para quem é e 2 a 6 perguntas frequentes. Seja honesto: sem promessa de ganho, sem 'garantido', sem '100%'. "
+                    "Use só o que o produto realmente contém (confira com read_product).\n" + "\n".join(lines))
+        if falta and falta["sem_preco"]:
+            return (f"LOJA (prioridade): '{falta['name']}' tem texto de venda mas falta o preço. Presidente ou CEO: defina AGORA com set_price "
+                    "(mínimo R$ 9,00; para guias deste tamanho, entre R$ 19 e R$ 49), com o motivo em uma frase.\n" + "\n".join(lines))
+        return "PRODUÇÃO: todos os produtos estão na loja. Revise textos fracos com request_rewrite ou escreva conteúdo de blog/SEO útil para atrair leitores.\n" + "\n".join(lines)
     name, s = target
     todo = f"Escreva AGORA a seção {s['position']} ('{s['title']}') de '{name}' com write_section: seção COMPLETA, no mínimo {config.MIN_SECTION_WORDS} palavras, em português, útil e original, sem pedir nada a ninguém."
     if s["needs_rewrite"]:

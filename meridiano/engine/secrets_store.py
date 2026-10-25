@@ -80,8 +80,9 @@ def status():
 
 
 def sync_owner_request(conn):
-    """O ÚNICO pedido permanente ao dono: o token. Aberto enquanto faltar; fechado quando configurado."""
-    if configured():
-        conn.execute("UPDATE owner_requests SET done=TRUE, resolution='token recebido' WHERE body=%s AND NOT done", (TOKEN_REQUEST,))
+    """O ÚNICO pedido permanente ao dono: token + identificação do vendedor (mesmo cartão no painel). Fecha quando os dois existem."""
+    from . import store
+    if configured() and store.store_ready(conn):
+        conn.execute("UPDATE owner_requests SET done=TRUE, resolution='token e identificação recebidos' WHERE body=%s AND NOT done", (TOKEN_REQUEST,))
     elif not conn.execute("SELECT 1 FROM owner_requests WHERE body=%s AND NOT done", (TOKEN_REQUEST,)).fetchone():
         conn.execute("INSERT INTO owner_requests(from_id,body) VALUES (NULL,%s)", (TOKEN_REQUEST,))
