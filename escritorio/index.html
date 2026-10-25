@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Meridiano Digital</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=Hanken+Grotesk:wght@400;500;700&display=swap">
+<style>
+/* Layout: HUD no topo, escritório em canvas pixelado, cartão do agente, feed de conversas, plano real. Visual único, noturno. */
+:root {
+  --bg: #0b1514;
+  --panel: #12211f;
+  --line: #24403b;
+  --ink: #e6f1ee;
+  --muted: #8aa39d;
+  --accent: #f2b84b;
+  --warn: #e07a5f;
+  --display: "Silkscreen", "Courier New", monospace;
+  --body: "Hanken Grotesk", system-ui, sans-serif;
+  color-scheme: dark;
+}
+html, body { background: var(--bg); }
+body {
+  color: var(--ink);
+  font-family: var(--body);
+  font-size: 15px;
+  line-height: 1.45;
+  padding-block: 16px 40px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.wrap { max-width: 640px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+h1 { font-family: var(--display); font-size: 22px; letter-spacing: .04em; margin: 0; text-wrap: balance; }
+h2 { font-family: var(--display); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin: 0 0 8px; font-weight: 400; }
+.hud { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; justify-content: space-between; }
+.sub { color: var(--muted); font-size: 13px; margin: 2px 0 0; }
+.chip { font-family: var(--display); font-size: 11px; letter-spacing: .08em; padding: 4px 8px; border: 1px solid var(--accent); color: var(--accent); }
+.cash { display: flex; gap: 16px; flex-wrap: wrap; border: 1px solid var(--line); background: var(--panel); padding: 10px 12px; }
+.cash div { min-width: 0; }
+.cash b { display: block; font-family: var(--display); font-size: 18px; font-variant-numeric: tabular-nums; }
+.cash span { color: var(--muted); font-size: 12px; }
+.stage { border: 2px solid var(--line); background: #08100f; line-height: 0; }
+canvas { width: 100%; height: auto; display: block; image-rendering: pixelated; touch-action: manipulation; }
+.card { border: 1px solid var(--line); background: var(--panel); padding: 12px; min-height: 76px; }
+.card strong { font-size: 16px; }
+.card .role { color: var(--accent); font-size: 13px; }
+.card p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+.feed { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow-y: auto; }
+.feed li { border-left: 3px solid var(--line); padding: 2px 0 2px 10px; min-width: 0; overflow-wrap: anywhere; }
+.feed .who { font-weight: 700; font-size: 13px; }
+.feed .t { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; margin-left: 6px; }
+.panel { border: 1px solid var(--line); background: var(--panel); padding: 12px; }
+.panel ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; }
+.panel li { min-width: 0; overflow-wrap: anywhere; }
+.todo::marker { color: var(--warn); }
+.note { color: var(--muted); font-size: 12px; margin: 0; }
+button { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); padding: 8px 12px; cursor: pointer; }
+button:focus-visible, canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+
+
+<div class="wrap">
+  <header class="hud">
+    <div>
+      <h1>Meridiano Digital</h1>
+      <p class="sub">Estúdio de produtos digitais em português</p>
+    </div>
+    <span class="chip" id="mode">MODO ENSAIO</span>
+  </header>
+
+  <section class="cash" aria-label="Caixa">
+    <div><b id="cash">R$ 0,00</b><span>Caixa real</span></div>
+    <div><b id="sales">0</b><span>Vendas reais</span></div>
+    <div><b id="agents">16</b><span>Agentes no escritório</span></div>
+  </section>
+
+  <div class="stage"><canvas id="c" width="240" height="240" tabindex="0" aria-label="Escritório virtual com os funcionários"></canvas></div>
+
+  <section class="card" id="card" aria-live="polite">
+    <strong>Toque em um funcionário</strong>
+    <p>Veja o cargo, a área e o que ele está fazendo agora.</p>
+  </section>
+
+  <section>
+    <h2>Conversas</h2>
+    <ul class="feed" id="feed"></ul>
+    <p class="note">Modo ensaio: as falas são de demonstração e servem para testar o escritório. Quando os agentes forem conectados ao trabalho real, o feed passa a mostrar o que eles fizeram de verdade.</p>
+  </section>
+
+  <section class="panel">
+    <h2>Para virar dinheiro de verdade</h2>
+    <ul>
+      <li class="todo">Abrir conta de vendedor em um marketplace brasileiro (Hotmart, Kiwify ou similar). Só o dono pode fazer.</li>
+      <li class="todo">Conectar os agentes a uma chave de API e a um serviço de execução agendada.</li>
+      <li class="todo">Primeiro produto: planilhas e guias prontos, escritos pelo time e revisados pelo jurídico.</li>
+      <li class="todo">Cada saque exige confirmação do dono.</li>
+    </ul>
+    <p class="note" style="margin-top:8px">Não há garantia de faturamento. O caixa acima só muda quando uma venda real for registrada.</p>
+  </section>
+</div>
+
+<script>
+(function () {
+  var W = 240, H = 240;
+  var cv = document.getElementById('c'), g = cv.getContext('2d');
+  g.imageSmoothingEnabled = false;
+  var HALL = { top: 62, mid: 134, low: 206 };
+  var COPA = { y: 224 };
+  var EDGE_L = 4, EDGE_R = 236;
+
+  var DEPT = {
+    dir: { n: 'Diretoria', c: '#5b4a8a' }, com: { n: 'Comercial', c: '#2f6f8f' }, mkt: { n: 'Marketing', c: '#8f4a6a' },
+    cont: { n: 'Conteúdo e Produto', c: '#3f8a5a' }, fin: { n: 'Financeiro', c: '#8a7a2f' }, jur: { n: 'Jurídico e Administração', c: '#6a6a7a' },
+    ops: { n: 'Atendimento, Tecnologia e Pessoas', c: '#a0603a' }
+  };
+
+  var A = [
+    { id: 'pres', n: 'Helena', r: 'Presidente', d: 'dir', x: 35, y: 46, h: 'top', s: '#7e57c2' },
+    { id: 'ceo', n: 'Rafael', r: 'CEO', d: 'dir', x: 105, y: 46, h: 'top', s: '#5c6bc0' },
+    { id: 'dcom', n: 'Marcos', r: 'Diretor Comercial', d: 'com', x: 22, y: 120, h: 'mid', s: '#29b6f6' },
+    { id: 'parc', n: 'Bianca', r: 'Parcerias e Vendas', d: 'com', x: 52, y: 120, h: 'mid', s: '#4fc3f7' },
+    { id: 'dmkt', n: 'Camila', r: 'Diretora de Marketing', d: 'mkt', x: 94, y: 120, h: 'mid', s: '#ec407a' },
+    { id: 'seo', n: 'Tiago', r: 'Analista de SEO', d: 'mkt', x: 124, y: 120, h: 'mid', s: '#f06292' },
+    { id: 'gcont', n: 'Luiza', r: 'Gerente de Conteúdo', d: 'cont', x: 160, y: 120, h: 'mid', s: '#66bb6a' },
+    { id: 'red', n: 'Davi', r: 'Redator', d: 'cont', x: 190, y: 120, h: 'mid', s: '#81c784' },
+    { id: 'des', n: 'Sofia', r: 'Designer', d: 'cont', x: 220, y: 120, h: 'mid', s: '#a5d6a7' },
+    { id: 'dfin', n: 'Otávio', r: 'Diretor Financeiro', d: 'fin', x: 22, y: 192, h: 'low', s: '#fbc02d' },
+    { id: 'afin', n: 'Elisa', r: 'Analista Financeira', d: 'fin', x: 52, y: 192, h: 'low', s: '#fdd835' },
+    { id: 'jur', n: 'Dr. Paulo', r: 'Jurídico e Compliance', d: 'jur', x: 94, y: 192, h: 'low', s: '#90a4ae' },
+    { id: 'adm', n: 'Nina', r: 'Administrativo', d: 'jur', x: 124, y: 192, h: 'low', s: '#b0bec5' },
+    { id: 'atd', n: 'Caio', r: 'Atendimento ao Cliente', d: 'ops', x: 160, y: 192, h: 'low', s: '#ff8a65' },
+    { id: 'ti', n: 'Yuri', r: 'Tecnologia', d: 'ops', x: 190, y: 192, h: 'low', s: '#ffab91' },
+    { id: 'rh', n: 'Marta', r: 'Recursos Humanos', d: 'ops', x: 220, y: 192, h: 'low', s: '#ffccbc' }
+  ];
+  var byId = {}; A.forEach(function (a) { byId[a.id] = a; });
+  document.getElementById('agents').textContent = A.length;
+
+  var LINES = [
+    ['dcom', 'dfin', 'Qual a margem mínima para o pacote de planilhas?', 'Sessenta por cento, sem desconto no lançamento.'],
+    ['gcont', 'jur', 'O guia de MEI está pronto para revisão.', 'Mande. Confiro as afirmações sobre imposto antes de publicar.'],
+    ['dmkt', 'seo', 'Quais buscas trazem gente para o modelo de fluxo de caixa?', 'Fluxo de caixa para MEI e controle de gastos. Vou montar a lista.'],
+    ['ceo', 'dfin', 'Quanto temos de caixa para o próximo produto?', 'Ainda nada de receita. O primeiro produto sai com custo zero.'],
+    ['pres', 'ceo', 'Qual é a meta do mês?', 'Publicar o primeiro produto e registrar a primeira venda real.'],
+    ['atd', 'ti', 'Cliente não achou o link de download.', 'Corrijo a página de entrega hoje.'],
+    ['rh', 'adm', 'Preciso do calendário de revisões da equipe.', 'Envio agora, fica na pasta compartilhada.'],
+    ['red', 'des', 'A capa do guia precisa de um título mais curto.', 'Faço duas versões e você escolhe.'],
+    ['parc', 'dcom', 'Um afiliado pediu material de divulgação.', 'Libere a página de afiliados com as regras de comissão.'],
+    ['jur', 'adm', 'O termo de uso precisa citar a política de reembolso.', 'Atualizo o texto e o rodapé.'],
+    ['ti', 'des', 'A página de venda está pesada no celular.', 'Comprimo as imagens e reenvio.'],
+    ['afin', 'dfin', 'Conferi as taxas do marketplace.', 'Então o preço mínimo sobe cinco reais.']
+  ];
+  var GENERIC = ['Bom dia, tudo alinhado por aí?', 'Preciso de dois minutos seus.', 'Anotado. Volto com isso hoje.', 'Combinado, fica comigo.'];
+
+  /* cenário fixo desenhado uma vez */
+  var bg = document.createElement('canvas'); bg.width = W; bg.height = H;
+  var b = bg.getContext('2d');
+  function R(c, x, y, w, h) { b.fillStyle = c; b.fillRect(x, y, w, h); }
+  function drawBg() {
+    R('#142522', 0, 0, W, H);
+    // corredores
+    [HALL.top, HALL.mid, HALL.low].forEach(function (y) { R('#1f3733', 0, y - 6, W, 12); });
+    R('#1f3733', 0, 0, 8, H - 20); R('#1f3733', W - 8, 0, 8, H - 20);
+    // salas do topo
+    [[0, 70, DEPT.dir.c], [70, 70, DEPT.dir.c], [140, 100, '#3a5650']].forEach(function (s) {
+      R('#1a2e2b', s[0], 0, s[1], 56); R(s[2], s[0], 0, s[1], 2);
+      R('#3a5650', s[0], 56, s[1], 2);
+    });
+    [[28, 44], [98, 114], [150, 230]].forEach(function (d) { R('#1f3733', d[0], 56, d[1] - d[0], 3); });
+    R('#3a5650', 69, 0, 2, 58); R('#3a5650', 139, 0, 2, 58);
+    // mesa de reunião
+    R('#6d4c30', 160, 26, 60, 14); R('#8a6340', 160, 26, 60, 2);
+    // tapetes por departamento
+    R(DEPT.com.c + '55', 6, 96, 68, 30); R(DEPT.mkt.c + '55', 78, 96, 66, 30); R(DEPT.cont.c + '55', 148, 96, 88, 30);
+    R(DEPT.fin.c + '55', 6, 168, 68, 30); R(DEPT.jur.c + '55', 78, 168, 66, 30); R(DEPT.ops.c + '55', 148, 168, 88, 30);
+    // mesas dos agentes (a mesa fica acima da cadeira)
+    A.forEach(function (a) {
+      var dy = a.y - 14;
+      R('#6d4c30', a.x - 9, dy, 18, 8); R('#8a6340', a.x - 9, dy, 18, 2);
+      R('#222', a.x - 3, dy - 5, 7, 5); R('#5fd0c0', a.x - 2, dy - 4, 5, 3);
+      R('#3b3b46', a.x - 3, a.y - 3, 7, 3);
+    });
+    // presidência: sofá e estante
+    R('#4a3a6a', 4, 6, 18, 8); R('#6a56a0', 4, 6, 18, 2);
+    R('#5a432b', 52, 4, 14, 20); R('#7a5a3a', 52, 4, 14, 2);
+    // plantas
+    [[12, 150], [226, 150], [112, 84], [4, 90]].forEach(function (p) { R('#6b4a2b', p[0], p[1] + 6, 6, 5); R('#2e8b57', p[0] - 1, p[1], 8, 7); });
+    // copa
+    R('#1a2e2b', 0, 212, W, 28); R('#3a5650', 0, 212, W, 2);
+    R('#8a3b3b', 14, 218, 40, 12); R('#a85050', 14, 218, 40, 3);
+    R('#cfd8dc', 110, 218, 20, 14); R('#90a4ae', 110, 218, 20, 3); R('#3b3b46', 114, 222, 5, 8);
+    R('#5a432b', 170, 220, 40, 8); R('#7a5a3a', 170, 220, 40, 2);
+  }
+  drawBg();
+
+  /* simulação */
+  var t0 = performance.now(), simMin = 8 * 60;
+  var feedEl = document.getElementById('feed');
+  var selected = null;
+
+  A.forEach(function (a, i) {
+    a.px = a.x; a.py = a.y; a.path = []; a.state = 'work'; a.wait = 2 + (i * 1.7) % 9; a.bubble = 0; a.act = 'Trabalhando na mesa';
+    a.step = 0; a.visitor = null;
+  });
+
+  function hallY(a) { return HALL[a.h]; }
+  function planPath(a, tx, ty, th) {
+    var p = [], x = a.px, y = a.py;
+    var fromHall = (y >= HALL.top - 8 && y <= HALL.top + 8) ? 'top' : (y >= HALL.mid - 8 && y <= HALL.mid + 8) ? 'mid' : (y >= HALL.low - 8 && y <= HALL.low + 8) ? 'low' : null;
+    if (!fromHall) { // está numa cadeira ou sala: desce para o corredor da própria linha
+      var h0 = a.h; p.push([x, HALL[h0]]); fromHall = h0;
+      if (a.state === 'meet') { p.length = 0; p.push([x, HALL.top]); fromHall = 'top'; }
+    }
+    if (fromHall !== th) {
+      var ex = (x < W / 2) ? EDGE_L : EDGE_R;
+      p.push([ex, HALL[fromHall]]); p.push([ex, HALL[th]]);
+    }
+    p.push([tx, HALL[th]]);
+    if (ty !== HALL[th]) p.push([tx, ty]);
+    return p;
+  }
+  function say(a, text, other) {
+    a.bubble = 3.2;
+    var li = document.createElement('li');
+    li.style.borderLeftColor = a.s;
+    var h = Math.floor(simMin / 60) % 24, m = Math.floor(simMin) % 60;
+    var tm = (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
+    li.innerHTML = '<span class="who"></span><span class="t"></span><div class="msg"></div>';
+    li.querySelector('.who').textContent = a.n + ' · ' + a.r;
+    li.querySelector('.t').textContent = tm + ' ensaio';
+    li.querySelector('.msg').textContent = text;
+    feedEl.insertBefore(li, feedEl.firstChild);
+    while (feedEl.children.length > 40) feedEl.removeChild(feedEl.lastChild);
+  }
+  function pickLine(a, b2) {
+    for (var i = 0; i < LINES.length; i++) {
+      if (LINES[i][0] === a.id && LINES[i][1] === b2.id) return [LINES[i][2], LINES[i][3]];
+    }
+    return [GENERIC[(Math.random() * GENERIC.length) | 0], GENERIC[(Math.random() * GENERIC.length) | 0]];
+  }
+  function decide(a) {
+    var r = Math.random();
+    if (r < 0.5) {
+      var others = A.filter(function (o) { return o !== a && o.state === 'work'; });
+      if (!others.length) { a.wait = 4; return; }
+      var o = others[(Math.random() * others.length) | 0];
+      o.state = 'host'; o.wait = 99; o.visitor = a;
+      a.target = o; a.state = 'visit'; a.act = 'Foi falar com ' + o.n;
+      a.path = planPath(a, o.x, HALL[o.h], o.h);
+    } else if (r < 0.72) {
+      a.state = 'coffee'; a.act = 'Pausa para o café';
+      var cx = 20 + ((Math.random() * 200) | 0);
+      a.path = planPath(a, cx, COPA.y, 'low');
+    } else if (r < 0.82 && (a.d === 'dir' || a.id === 'dcom' || a.id === 'dmkt' || a.id === 'gcont')) {
+      a.state = 'meet'; a.act = 'Foi para a sala de reunião';
+      a.path = planPath(a, 164 + ((Math.random() * 52) | 0), 50, 'top');
+    } else { a.wait = 5 + Math.random() * 8; }
+  }
+  function goHome(a) {
+    a.state = 'return'; a.act = 'Voltando para a mesa';
+    var inCopa = a.py > HALL.low + 4;
+    var p = [];
+    if (inCopa) p.push([a.px, HALL.low]);
+    var from = inCopa ? 'low' : (a.py <= HALL.top + 8 && a.py >= HALL.top - 8) ? 'top' : (a.py <= HALL.mid + 8 && a.py >= HALL.mid - 8) ? 'mid' : 'low';
+    if (a.py < 58) { p.push([a.px, HALL.top]); from = 'top'; }
+    if (from !== a.h) { var ex = (a.px < W / 2) ? EDGE_L : EDGE_R; p.push([ex, HALL[from]]); p.push([ex, HALL[a.h]]); }
+    p.push([a.x, HALL[a.h]]); p.push([a.x, a.y]);
+    a.path = p;
+  }
+  function arrive(a) {
+    if (a.state === 'visit') {
+      var o = a.target, ls = pickLine(a, o);
+      a.state = 'talk'; a.wait = 7; a.act = 'Conversando com ' + o.n;
+      say(a, ls[0]);
+      o.talkLine = ls[1]; o.talkDelay = 3.3;
+    } else if (a.state === 'coffee') { a.state = 'rest'; a.wait = 4 + Math.random() * 4; a.act = 'Tomando café'; }
+    else if (a.state === 'meet') {
+      a.state = 'meeting'; a.wait = 10 + Math.random() * 6; a.act = 'Em reunião de alinhamento';
+      if (Math.random() < 0.6) say(a, 'Vamos alinhar as prioridades da semana.');
+    } else if (a.state === 'return') { a.state = 'work'; a.wait = 8 + Math.random() * 10; a.act = 'Trabalhando na mesa'; a.px = a.x; a.py = a.y; }
+  }
+  var lastSay = {};
+  function update(dt) {
+    simMin += dt * 2;
+    A.forEach(function (a) {
+      if (a.bubble > 0) a.bubble -= dt;
+      if (a.talkLine) { a.talkDelay -= dt; if (a.talkDelay <= 0) { say(a, a.talkLine); a.talkLine = null; } }
+      if (a.path.length) {
+        var tgt = a.path[0], dx = tgt[0] - a.px, dy = tgt[1] - a.py, d = Math.hypot(dx, dy), sp = 30 * dt;
+        if (d <= sp) { a.px = tgt[0]; a.py = tgt[1]; a.path.shift(); if (!a.path.length) arrive(a); }
+        else { a.px += dx / d * sp; a.py += dy / d * sp; a.step += dt * 9; a.dir = dx; }
+        return;
+      }
+      a.wait -= dt;
+      if (a.wait > 0) return;
+      if (a.state === 'work') decide(a);
+      else if (a.state === 'host') { /* aguarda o visitante sair */ if (a.visitor && a.visitor.state !== 'talk' && a.visitor.state !== 'visit') { a.state = 'work'; a.wait = 3; a.visitor = null; } else a.wait = 1; }
+      else if (a.state === 'talk') { if (a.target) { a.target.talkLine = null; } goHome(a); }
+      else if (a.state === 'rest' || a.state === 'meeting') goHome(a);
+      else a.wait = 1;
+    });
+  }
+
+  function person(a) {
+    var x = Math.round(a.px), y = Math.round(a.py), walking = a.path.length > 0;
+    var leg = walking ? (Math.floor(a.step) % 2) : 0;
+    g.fillStyle = '#00000044'; g.fillRect(x - 4, y - 1, 8, 2);
+    g.fillStyle = '#2b2b3a'; g.fillRect(x - 3, y - 4, 2, 4 - leg); g.fillRect(x + 1, y - 4, 2, 4 - (1 - leg));
+    g.fillStyle = a.s; g.fillRect(x - 3, y - 9, 6, 6);
+    g.fillStyle = '#f1c9a5'; g.fillRect(x - 2, y - 13, 4, 4);
+    g.fillStyle = '#3a2a22'; g.fillRect(x - 2, y - 14, 4, 2);
+    if (selected === a) { g.fillStyle = '#f2b84b'; g.fillRect(x - 1, y - 19, 2, 3); g.fillRect(x - 2, y - 17, 4, 1); }
+    if (a.bubble > 0) {
+      g.fillStyle = '#ffffff'; g.fillRect(x - 6, y - 24, 12, 7); g.fillRect(x - 1, y - 17, 2, 2);
+      g.fillStyle = '#222'; g.fillRect(x - 4, y - 21, 2, 2); g.fillRect(x - 1, y - 21, 2, 2); g.fillRect(x + 2, y - 21, 2, 2);
+    }
+  }
+  function render() {
+    g.drawImage(bg, 0, 0);
+    A.slice().sort(function (p, q) { return p.py - q.py; }).forEach(person);
+  }
+
+  var last = performance.now();
+  var still = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function loop(now) {
+    var dt = Math.min(0.1, (now - last) / 1000); last = now;
+    if (!still) update(dt);
+    render();
+    updateCard();
+    requestAnimationFrame(loop);
+  }
+
+  var cardEl = document.getElementById('card');
+  var cardKey = '';
+  function updateCard() {
+    if (!selected) return;
+    var key = selected.id + '|' + selected.act;
+    if (key === cardKey) return; cardKey = key;
+    cardEl.innerHTML = '<strong></strong><div class="role"></div><p></p><p></p>';
+    var ps = cardEl.querySelectorAll('p');
+    cardEl.querySelector('strong').textContent = selected.n;
+    cardEl.querySelector('.role').textContent = selected.r + ' · ' + DEPT[selected.d].n;
+    ps[0].textContent = 'Agora: ' + selected.act + '.';
+    ps[1].textContent = 'Ligação com o trabalho real: pendente. Este agente ainda não executa tarefas fora do escritório.';
+  }
+  function pick(ev) {
+    var rc = cv.getBoundingClientRect();
+    var p = ev.touches ? ev.touches[0] : ev;
+    var x = (p.clientX - rc.left) / rc.width * W, y = (p.clientY - rc.top) / rc.height * H;
+    var best = null, bd = 14;
+    A.forEach(function (a) { var d = Math.hypot(a.px - x, (a.py - 6) - y); if (d < bd) { bd = d; best = a; } });
+    if (best) { selected = best; cardKey = ''; updateCard(); }
+  }
+  cv.addEventListener('click', pick);
+
+  // estado real opcional, publicado ao lado da página
+  try {
+    fetch('state.json', { cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; }).then(function (s) {
+      if (!s) return;
+      if (typeof s.caixa === 'number') document.getElementById('cash').textContent = 'R$ ' + s.caixa.toFixed(2).replace('.', ',');
+      if (typeof s.vendas === 'number') document.getElementById('sales').textContent = s.vendas;
+      if (s.modo) document.getElementById('mode').textContent = String(s.modo).toUpperCase();
+    }).catch(function () {});
+  } catch (e) {}
+
+  say(byId.pres, 'Bom dia. O escritório abriu. Ainda estamos em modo ensaio.');
+  byId.pres.bubble = 3;
+  requestAnimationFrame(loop);
+})();
+</script>
+
+</body>
+</html>
