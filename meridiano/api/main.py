@@ -45,7 +45,9 @@ def state():
     sales = c.execute("SELECT COUNT(*) AS n FROM ledger WHERE kind='receita'").fetchone()["n"]
     n = c.execute("SELECT COUNT(*) AS n FROM employees WHERE active").fetchone()["n"]
     falhas, ultimo_erro = llm.failures_today(c)
-    return {"falhas_hoje": falhas, "ultimo_erro": ultimo_erro, "caixa": db.cash_cents(c) / 100, "vendas": sales, "agentes": n, "modo": "real",
+    reset = c.execute("SELECT date_trunc('day', now()) + interval '1 day' AS r").fetchone()["r"]
+    return {"orcamento_pct": round(100 * llm.budget_fraction(c), 1), "orcamento_zera_em": reset.isoformat(),
+            "falhas_hoje": falhas, "ultimo_erro": ultimo_erro, "caixa": db.cash_cents(c) / 100, "vendas": sales, "agentes": n, "modo": "real",
             "uso_hoje": {"chamadas": calls, "tokens": tokens,
                          "limite_chamadas": config.DAILY_CALL_LIMIT, "limite_tokens": config.DAILY_TOKEN_LIMIT}}
 

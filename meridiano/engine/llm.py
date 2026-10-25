@@ -1,4 +1,6 @@
 """Cliente da API Nous (formato OpenAI) com lista fixa de modelos e limite diário."""
+import time
+
 import httpx
 from . import config
 
@@ -9,6 +11,13 @@ class BudgetExceeded(Exception):
 
 class EmptyResponse(Exception):
     pass
+
+
+class RateLimited(Exception):
+    """HTTP 429 do provedor: não é falha nossa, não entra na conta de falhas."""
+    def __init__(self, model, retry_after=None):
+        super().__init__(f"429 em {model}")
+        self.retry_after = retry_after
 
 
 def usage_today(conn):
@@ -42,8 +51,16 @@ def chat(conn, employee_id, model, messages, tools=None):
     try:
         r = httpx.post(config.API_BASE + "/chat/completions", json=body, timeout=120,
                        headers={"Authorization": "Bearer " + key})
+        if r.status_code == 429:
+            try:
+                ra = float(r.headers.get("retry-after", ""))
+            except ValueError:
+                ra = None
+            raise RateLimited(model, ra)
         r.raise_for_status()
         data = r.json()
+    except RateLimited:
+        raise
     except Exception as e:
         detail = str(e)
         resp = getattr(e, "response", None)
@@ -63,6 +80,12 @@ def chat(conn, employee_id, model, messages, tools=None):
     return msg
 
 
+def budget_fraction(conn):
+    """Fração do limite diário já usada (a maior entre tokens e chamadas)."""
+    calls, tokens = usage_today(conn)
+    return max(tokens / config.DAILY_TOKEN_LIMIT, calls / config.DAILY_CALL_LIMIT)
+
+
 def ahead_of_budget(conn):
     """True se os tokens de hoje já passaram do ritmo do dia (+15%): o motor espera em vez de gastar tudo cedo."""
     _, tokens = usage_today(conn)
@@ -70,15 +93,22 @@ def ahead_of_budget(conn):
     return tokens / config.DAILY_TOKEN_LIMIT > float(frac) + 0.15
 
 
-def chat_fallback(conn, employee_id, model, messages, tools=None):
-    """Tenta o modelo do funcionário e, se vier vazio/erro, até 2 outros do rodízio."""
+def chat_fallback(conn, employee_id, model, messages, tools=None, sleep=time.sleep):
+    """Tenta o modelo do funcionário e, se vier vazio/erro, até 2 outros do rodízio.
+    Em 429 espera com recuo exponencial (2, 4, 8 s, ou o Retry-After) antes de desistir daquele modelo."""
     order = [model] + [m for m in config.DEFAULT_ROTATION if m != model][:2]
     last = None
     for m in order:
-        try:
-            return chat(conn, employee_id, m, messages, tools)
-        except BudgetExceeded:
-            raise
-        except Exception as e:
-            last = e
+        for attempt in range(3):
+            try:
+                return chat(conn, employee_id, m, messages, tools)
+            except BudgetExceeded:
+                raise
+            except RateLimited as e:
+                last = e
+                if attempt < 2:
+                    sleep(min(30, e.retry_after or 2 ** (attempt + 1)))
+            except Exception as e:
+                last = e
+                break
     raise last
